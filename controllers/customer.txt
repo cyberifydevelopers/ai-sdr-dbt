@@ -1,0 +1,23 @@
+{
+  "name": "John",
+  "provider": "openai",
+  "attached_Number": null,
+  "category": "contacting_lead",
+  "draft": false,
+  "endCallPhrases": [],
+  "first_message": "Hello, this is Ava. How may I assist you today?",
+  "forwardingPhoneNumber": "",
+  "knowledgeBase": [],
+  "languages": ["English"],
+  "maxTokens": 250,
+  "model": "gpt-4o-mini",
+  "systemPrompt": "I'm your virtual assistant. How can I help you today? I can provide information about our products, assist with placing orders, or help with any questions you may have. Just let me know what you're looking for!",
+  "temperature": 0.5,
+  "transcribe_language": "Multilingual",
+  "transcribe_model": "gemini-2.0-flash",
+  "transcribe_provider": "google",
+  "voice": "stella",
+  "voice_model": "stella",
+  "voice_provider": "deepgram",
+  "model_provider": "deepgram"
+}
