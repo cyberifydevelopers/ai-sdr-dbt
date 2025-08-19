@@ -7,12 +7,25 @@ from fastapi.staticfiles import StaticFiles
 import os
 from pathlib import Path
 from controllers.impersonate_controller import impersonate_router
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-Path("media/profile_photos").mkdir(parents=True, exist_ok=True)
+# Path("media/profile_photos").mkdir(parents=True, exist_ok=True)
+
+MEDIA_ROOT = os.getenv("PROFILE_PHOTO_STORAGE", "media/profile_photos")
+media_parent = Path(MEDIA_ROOT).parent
+media_parent.mkdir(parents=True, exist_ok=True)
+
+
+
 
 app = FastAPI(lifespan=lifespan)
-app.mount("/media", StaticFiles(directory="media"), name="media")
+# app.mount("/media", StaticFiles(directory="media"), name="media")
 
+app.mount("/media", StaticFiles(directory=str(media_parent)), name="media")
+
+app.add_middleware(
+    TrustedHostMiddleware, allowed_hosts=["*"]
+)
 app.include_router(auth_router, prefix='/api', tags=['Authentication'])
 app.include_router(twilio_controller.router, prefix='/api', tags=['Twilio Controller'])
 app.include_router(assistant_controller.router, prefix='/api', tags=['Assistant Controller'])
