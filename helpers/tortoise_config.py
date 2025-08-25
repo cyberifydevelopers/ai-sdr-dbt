@@ -18,8 +18,9 @@ TORTOISE_CONFIG = {
                 "models.call_log",
                 "models.file",
                 "models.lead",
-                "models.documents"
-                
+                "models.documents",
+                "models.campaign",
+                "models.crm"
             ]
         }
     }
