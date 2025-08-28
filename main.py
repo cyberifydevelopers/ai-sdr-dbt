@@ -83,6 +83,7 @@ from controllers.campaign_controller import (
     router as campaign_router,
     _schedule_campaign_job,  # used at startup to re-schedule active campaigns
 )
+from scheduler.campaign_scheduler import get_scheduler, reschedule_campaigns_on_startup, shutdown_scheduler
 
 # ----- Media setup -----
 MEDIA_ROOT = os.getenv("PROFILE_PHOTO_STORAGE", "media/profile_photos")
@@ -147,3 +148,18 @@ async def _rehydrate_campaign_jobs():
     except Exception as e:
         # If something fundamental fails, still let app boot; you can inspect logs.
         print(f"[campaign scheduler] Startup rehydration error: {e}")
+
+
+
+
+
+@app.on_event("startup")
+async def _startup():
+    # ensure scheduler exists
+    get_scheduler()
+    # reattach cron jobs for RUNNING/SCHEDULED campaigns
+    await reschedule_campaigns_on_startup()
+
+@app.on_event("shutdown")
+async def _shutdown():
+    shutdown_scheduler(wait=False)
