@@ -35,7 +35,7 @@ def get_scheduler() -> AsyncIOScheduler:
         timezone=os.getenv("APS_TIMEZONE", "UTC"),
         job_defaults={
             "coalesce": True,
-            "max_instances": 1, 
+            "max_instances": 1,
             "misfire_grace_time": int(os.getenv("APS_MISFIRE_GRACE_SECONDS", "60")),
         },
     )
@@ -104,4 +104,3 @@ def shutdown_scheduler(wait: bool = False):
     sch = get_scheduler()
     if sch.running:
         sch.shutdown(wait=wait)
-

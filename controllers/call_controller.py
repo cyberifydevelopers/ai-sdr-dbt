@@ -263,7 +263,167 @@ async def update_call_logs_for_missing_details():
         print(f"Error in update_call_logs_for_missing_details: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-async def get_call_details(call_id: str, delay: int ,user_id :int, lead_id : Optional[int] = None ):
+# async def get_call_details(call_id: str, delay: int ,user_id :int, lead_id : Optional[int] = None ):
+#     print("background task-----------------------")
+#     try:
+#         await asyncio.sleep(delay)
+#         print(f"Starting call details retrieval after {delay} seconds delay")
+        
+#         # Enhanced retry logic for long calls
+#         max_retries = 5  # Increased from 3 to 5 for long calls
+#         base_retry_delay = 120  # 2 minutes base delay between retries
+#         progressive_delay = True  # Increase delay progressively
+        
+#         for attempt in range(max_retries):
+#             # Progressive delay: 2min, 4min, 6min, 8min, 10min
+#             if progressive_delay and attempt > 0:
+#                 retry_delay = base_retry_delay * (attempt + 1)
+#             else:
+#                 retry_delay = base_retry_delay
+                
+#             print(f"Attempt {attempt + 1}/{max_retries} - Retry delay: {retry_delay} seconds")
+            
+#             call_detail_url = f"https://api.vapi.ai/call/{call_id}"
+#             async with httpx.AsyncClient() as client:
+#                 response = await client.get(call_detail_url, headers=get_headers())
+            
+#             if response.status_code != 200:
+#                 print(f"Failed to retrieve call details, status: {response.status_code}")
+#                 if attempt < max_retries - 1:
+#                     print(f"Retrying in {retry_delay} seconds...")
+#                     await asyncio.sleep(retry_delay)
+#                     continue
+#                 else:
+#                     raise HTTPException(status_code=response.status_code, detail="Failed to retrieve call details")
+
+#             call_data = response.json()
+#             started_at = call_data.get("startedAt", None)
+#             ended_at = call_data.get("endedAt", None)
+#             print(f"Call started: {started_at}")
+#             print(f"Call ended: {ended_at}")
+            
+#             # Calculate actual call duration
+#             call_duration = None
+#             if started_at and ended_at:
+#                 start_time = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+#                 end_time = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+#                 call_duration = (end_time - start_time).total_seconds()
+#                 print(f"Actual call duration: {call_duration} seconds ({call_duration/60:.1f} minutes)")
+            
+#             transcript = call_data.get("artifact", {}).get("transcript", "No transcript available")
+#             recording_url = call_data.get("artifact", {}).get("recordingUrl", "N/A")
+            
+#             # Enhanced transcript validation for long calls
+#             transcript_quality = "incomplete"
+#             if transcript and transcript != "No transcript available":
+#                 word_count = len(transcript.split())
+#                 sentence_count = len(transcript.split('.'))
+                
+#                 # For long calls, expect more content
+#                 if call_duration and call_duration > 1800:  # > 30 minutes
+#                     min_words = int(call_duration / 60 * 10)  # ~10 words per minute
+#                     min_sentences = int(call_duration / 60 * 2)  # ~2 sentences per minute
+#                 else:
+#                     min_words = 50
+#                     min_sentences = 10
+                
+#                 print(f"Transcript stats - Words: {word_count}, Sentences: {sentence_count}")
+#                 print(f"Expected minimum - Words: {min_words}, Sentences: {min_sentences}")
+                
+#                 if word_count >= min_words and sentence_count >= min_sentences:
+#                     transcript_quality = "complete"
+#                     print(f"Complete transcript found on attempt {attempt + 1}")
+#                     break
+#                 else:
+#                     transcript_quality = "partial"
+#                     print(f"Partial transcript on attempt {attempt + 1} - Quality: {transcript_quality}")
+#             else:
+#                 print(f"No transcript available on attempt {attempt + 1}")
+            
+#             # Progressive delay for next attempt
+#             if attempt < max_retries - 1:
+#                 print(f"Transcript incomplete, retrying in {retry_delay} seconds...")
+#                 await asyncio.sleep(retry_delay)
+#             else:
+#                 print("Max retries reached, using available transcript")
+        
+#         # Process call data
+#         user = await User.filter(id=user_id).first()
+        
+#         call = await CallLog.get_or_none(call_id=call_id)
+#         if call:
+#             print(f"Updating existing call log for call ID: {call_id}")
+#             print(f"Call duration: {call_duration} seconds")
+#             print(f"Call ended reason: {call_data.get('endedReason', 'Unknown')}")
+
+#             call.is_transferred = False
+#             call.call_ended_reason = call_data.get("endedReason", "Unknown")
+#             call.cost = call_data.get("cost", 0)
+#             call.status = call_data.get("status", "Unknown")
+#             call.call_duration = call_duration if call_duration else 0
+#             call.criteria_satisfied = False
+            
+#             if isinstance(ended_at, str):
+#                 call.call_ended_at = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+#             else:
+#                 call.call_ended_at = ended_at
+                
+#             await call.save()
+            
+#             # Enhanced debug logging for long calls
+#             print("🔊 [CALL ENDED] ENHANCED DEBUG INFO:")
+#             print(f"🔊 [CALL ENDED] Call ID: {call_id}")
+#             print(f"🔊 [CALL ENDED] Call Duration: {call_duration} seconds ({call_duration/60:.1f} minutes)")
+#             print(f"🔊 [CALL ENDED] Call Status: {call_data.get('status', 'Unknown')}")
+#             print(f"🔊 [CALL ENDED] Call Ended Reason: {call_data.get('endedReason', 'Unknown')}")
+#             print(f"🔊 [CALL ENDED] Call Cost: {call_data.get('cost', 0)}")
+#             print(f"🔊 [CALL ENDED] Transcript Quality: {transcript_quality}")
+#             print(f"🔊 [CALL ENDED] Transcript Length: {len(transcript) if transcript else 0} characters")
+#             print(f"🔊 [CALL ENDED] Recording URL: {recording_url}")
+#             if transcript:
+#                 print(f"🔊 [CALL ENDED] Transcript Preview: {transcript[:300]}...")
+
+#         else:
+#             print(f"Creating new call log for call ID: {call_id}")
+            
+#             new_call_log = await CallLog.create(
+#                 is_transferred = False,
+#                 call_id=call_id,
+#                 call_ended_reason=call_data.get("endedReason", "Unknown"),
+#                 cost=call_data.get("cost", 0),
+#                 status=call_data.get("status", "Unknown"),
+#                 call_ended_at=datetime.fromisoformat(ended_at.replace("Z", "+00:00")) if isinstance(ended_at, str) else ended_at,
+#                 call_duration=call_duration,
+#                 criteria_satisfied = False
+#             )
+            
+#             # Enhanced debug logging for new call logs
+#             print("🔊 [CALL ENDED] ENHANCED DEBUG INFO (NEW LOG):")
+#             print(f"🔊 [CALL ENDED] Call ID: {call_id}")
+#             print(f"🔊 [CALL ENDED] Call Duration: {call_duration} seconds ({call_duration/60:.1f} minutes)")
+#             print(f"🔊 [CALL ENDED] Call Status: {call_data.get('status', 'Unknown')}")
+#             print(f"🔊 [CALL ENDED] Call Ended Reason: {call_data.get('endedReason', 'Unknown')}")
+#             print(f"🔊 [CALL ENDED] Call Cost: {call_data.get('cost', 0)}")
+#             print(f"🔊 [CALL ENDED] Transcript Quality: {transcript_quality}")
+#             print(f"🔊 [CALL ENDED] Transcript Length: {len(transcript) if transcript else 0} characters")
+#             print(f"🔊 [CALL ENDED] Recording URL: {recording_url}")
+#             if transcript:
+#                 print(f"🔊 [CALL ENDED] Transcript Preview: {transcript[:300]}...")
+
+#     except Exception as e:
+#         print(f"Error in get_call_details: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+
+
+
+
+
+
+
+
+async def get_call_details(call_id: str, delay: int, user_id: int, lead_id: Optional[int] = None):
     print("background task-----------------------")
     try:
         await asyncio.sleep(delay)
@@ -410,9 +570,23 @@ async def get_call_details(call_id: str, delay: int ,user_id :int, lead_id : Opt
             if transcript:
                 print(f"🔊 [CALL ENDED] Transcript Preview: {transcript[:300]}...")
 
+        # ------------------------------------------------------------------
+        # 🔗 NEW: trigger appointment extraction via internal HTTP self-call
+        # ------------------------------------------------------------------
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(
+                    f"{os.getenv('API_PUBLIC_BASE', 'http://localhost:8000')}/api/appointments/from-call/{call_id}",
+                    headers={"Authorization": f"Bearer {generate_token()}"},
+                )
+            print("[Appointments] extraction triggered successfully.")
+        except Exception as _e:
+            print("appointment extract failed:", _e)
+
     except Exception as e:
         print(f"Error in get_call_details: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 
 @router.post("/refresh-transcript/{call_id}")
 async def refresh_call_transcript(call_id: str, user: Annotated[User, Depends(get_current_user)]):

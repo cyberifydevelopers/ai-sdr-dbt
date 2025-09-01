@@ -68,6 +68,7 @@ from controllers import (
     documents_controller,
     crm_controller,
     admin_controller,
+    appointment_controller
 )
 from helpers.tortoise_config import lifespan
 from controllers.auth_controller import auth_router
@@ -110,6 +111,7 @@ app.include_router(auth_router, prefix="/api", tags=["Authentication"])
 app.include_router(twilio_controller.router, prefix="/api", tags=["Twilio Controller"])
 app.include_router(assistant_controller.router, prefix="/api", tags=["Assistant Controller"])
 app.include_router(call_controller.router, prefix="/api", tags=["Call Controller"])
+app.include_router(appointment_controller.router , prefix="/api" , tags=["Appointments Controller"] )
 app.include_router(lead_controller.router, prefix="/api", tags=["Leads Controller"])
 app.include_router(statistics_controller.router, prefix="/api", tags=["Statistics Controller"])
 app.include_router(documents_controller.router, prefix="/api", tags=["Documents Controller"])
@@ -162,4 +164,4 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    shutdown_scheduler(wait=False)
+    shutdown_scheduler(wait=False)  

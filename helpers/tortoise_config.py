@@ -20,7 +20,8 @@ TORTOISE_CONFIG = {
                 "models.lead",
                 "models.documents",
                 "models.campaign",
-                "models.crm"
+                "models.crm",
+                "models.appointment"
             ]
         }
     }
