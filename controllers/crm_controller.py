@@ -3020,7 +3020,7 @@ def _sanitize_redirect(back: str) -> str:
         origin = f"{p.scheme}://{p.netloc}"
         if origin in allowed:
             return back
-    return "/integrations"
+    return "/user/CRM"
 
 # ---- Zoho DC helpers ----
 _ZOHO_ACCOUNTS_TO_API = {
@@ -3232,7 +3232,7 @@ async def list_accounts(user: User = Depends(get_current_user)):
 async def start_connect(
     crm: str,
     user: User = Depends(get_current_user),
-    redirect_to: Optional[str] = Body(default="/integrations", embed=True),
+    redirect_to: Optional[str] = Body(default="/user/CRM", embed=True),
 ):
     crm = crm.lower()
     if crm not in SUPPORTED:
@@ -3311,7 +3311,7 @@ async def oauth_callback(
     if not st:
         return JSONResponse(status_code=400, content={"detail": "Invalid or expired OAuth state."})
 
-    back = _sanitize_redirect(st.redirect_to or "/integrations")
+    back = _sanitize_redirect(st.redirect_to or "/user/CRM")
     cfg = _cfg()[crm]
 
     if error:
