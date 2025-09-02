@@ -1,4 +1,6 @@
-# controllers/campaign_controller.py
+
+
+# # controllers/campaign_controller.py
 # import logging
 # import asyncio
 # from datetime import datetime, date, time, timedelta
@@ -386,7 +388,7 @@
 #         if remaining == 0:
 #             c.status = CampaignStatus.COMPLETED
 #             await c.save()
-#             logger.info("campaign %s: completed (no remaining leads)", c.id)
+#             logger.info("campaign %s: completed (no remaining leads)")
 #         return
 
 #     sem = asyncio.Semaphore(parallel)
@@ -916,7 +918,29 @@
 
 
 
-# controllers/campaign_controller.py
+
+
+
+
+
+
+
+
+
+
+
+
+
+# controllers/campaign_controller.py (UPDATED)
+# ——————————————————————————————————————————————————————————
+# Notes:
+# • Added rich logging + print() “breadcrumbs” at all key points.
+# • Kept your original logic & models intact; only tightened safety checks,
+#   clarified timezone handling, and added diagnostics.
+# • Use app-level logging config to emit INFO/DEBUG to console/file.
+# • If you truly want console prints in prod, keep them; otherwise remove.
+# ——————————————————————————————————————————————————————————
+
 import logging
 import asyncio
 from datetime import datetime, date, time, timedelta
@@ -924,7 +948,7 @@ from typing import Annotated, List, Optional
 
 import pytz
 import httpx
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from apscheduler.triggers.date import DateTrigger
 from tortoise.expressions import Q
@@ -955,11 +979,23 @@ from pydantic import BaseModel, Field
 router = APIRouter()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Logging
+# Logging helpers
 # ─────────────────────────────────────────────────────────────────────────────
 logger = logging.getLogger("campaigns")
-# (configure logging level/handlers globally in your app startup if needed)
 
+# Quick helper: log + print (so you can tail stdout easily)
+def _lp(level: str, msg: str, **kv):
+    text = f"{msg} | " + ", ".join(f"{k}={v}" for k, v in kv.items()) if kv else msg
+    if level == "debug":
+        logger.debug(text)
+    elif level == "warning":
+        logger.warning(text)
+    elif level == "error":
+        logger.error(text)
+    else:
+        logger.info(text)
+    print(f"[campaigns][{level.upper()}] {text}")
+789,
 # ─────────────────────────────────────────────────────────────────────────────
 # Schemas
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1007,14 +1043,15 @@ class RunNowPayload(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Time helpers
 # ─────────────────────────────────────────────────────────────────────────────
 BUSY_REASONS = {"busy", "user-busy", "target-busy", "no-answer", "call-rejected"}
 
 
 def now_utc() -> datetime:
-    """Return tz-aware current UTC time."""
-    return datetime.now(pytz.utc)
+    dt = datetime.now(pytz.utc)
+    _lp("debug", "now_utc()", iso=dt.isoformat())
+    return dt
 
 
 def _parse_hhmm(s: Optional[str]) -> Optional[time]:
@@ -1025,20 +1062,18 @@ def _parse_hhmm(s: Optional[str]) -> Optional[time]:
 
 
 def _as_tzaware(dt: Optional[datetime], tz) -> Optional[datetime]:
-    """Ensure dt is timezone-aware in tz."""
     if dt is None:
         return None
     if dt.tzinfo is None:
-        # treat naive as local to the campaign timezone
-        return tz.localize(dt)
-    return dt.astimezone(tz)
+        aware = tz.localize(dt)
+    else:
+        aware = dt.astimezone(tz)
+    _lp("debug", "_as_tzaware", input=repr(dt), tz=str(tz), out=aware.isoformat())
+    return aware
 
 
 def _within_window(c: Campaign, now: datetime) -> bool:
-    """
-    Check if the campaign is currently within its allowed window.
-    `now` should be tz-aware (UTC).
-    """
+    """Check if campaign is currently within allowed window. `now` should be tz-aware (UTC)."""
     if now.tzinfo is None:
         now = now.replace(tzinfo=pytz.utc)
 
@@ -1048,23 +1083,30 @@ def _within_window(c: Campaign, now: datetime) -> bool:
     start_at = _as_tzaware(c.start_at, tz)
     end_at = _as_tzaware(c.end_at, tz)
     if start_at and now_local < start_at:
+        _lp("debug", "outside window: before start_at", now_local=now_local.isoformat(), start_at=start_at.isoformat())
         return False
     if end_at and now_local > end_at:
+        _lp("debug", "outside window: after end_at", now_local=now_local.isoformat(), end_at=end_at.isoformat())
         return False
 
     if c.days_of_week and now_local.weekday() not in set(c.days_of_week):
+        _lp("debug", "outside window: wrong weekday", weekday=now_local.weekday(), allowed=c.days_of_week)
         return False
 
     start_t = _parse_hhmm(c.daily_start) or time(0, 0)
     end_t = _parse_hhmm(c.daily_end) or time(23, 59)
-    return start_t <= now_local.time() <= end_t
+    ok = start_t <= now_local.time() <= end_t
+    _lp("debug", "within_window?", start=str(start_t), end=str(end_t), now=str(now_local.time()), ok=ok)
+    return ok
 
 
 async def _compute_lead_ids_for_campaign(c: Campaign) -> List[int]:
+    _lp("debug", "compute_lead_ids_for_campaign: start", campaign_id=c.id)
     base = Lead.filter(file_id=c.file_id, dnc=False)
 
     if c.selection_mode == CampaignSelectionMode.ONLY:
         if not c.include_lead_ids:
+            _lp("info", "include list empty; returns []", campaign_id=c.id)
             return []
         base = base.filter(id__in=c.include_lead_ids)
     elif c.selection_mode == CampaignSelectionMode.SKIP:
@@ -1072,17 +1114,22 @@ async def _compute_lead_ids_for_campaign(c: Campaign) -> List[int]:
             base = base.exclude(id__in=c.exclude_lead_ids)
 
     leads = await base.all()
-    return [l.id for l in leads]
+    ids = [l.id for l in leads]
+    _lp("info", "compute_lead_ids_for_campaign: done", campaign_id=c.id, count=len(ids))
+    return ids
 
 
 async def _ensure_progress_rows(campaign: Campaign) -> int:
+    _lp("debug", "ensure_progress_rows: start", campaign_id=campaign.id)
     lead_ids = await _compute_lead_ids_for_campaign(campaign)
     if not lead_ids:
+        _lp("info", "ensure_progress_rows: no eligible leads", campaign_id=campaign.id)
         return 0
 
     existing_ids = await CampaignLeadProgress.filter(
         campaign_id=campaign.id
     ).values_list("lead_id", flat=True)
+
     existing_set = set(existing_ids)
     to_create = [lid for lid in lead_ids if lid not in existing_set]
 
@@ -1092,19 +1139,17 @@ async def _ensure_progress_rows(campaign: Campaign) -> int:
     ]
     if objs:
         await CampaignLeadProgress.bulk_create(objs)
-        logger.info("campaign %s: queued %d new leads", campaign.id, len(objs))
+        _lp("info", "ensure_progress_rows: created", campaign_id=campaign.id, created=len(objs))
+    else:
+        _lp("debug", "ensure_progress_rows: nothing to create", campaign_id=campaign.id)
     return len(objs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared helpers usable from other controllers
+# Shared helper callable from other controllers
 # ─────────────────────────────────────────────────────────────────────────────
 async def trigger_campaign_refresh_for_file(file_id: int, and_tick: bool = True) -> dict:
-    """
-    Find SCHEDULED/RUNNING campaigns tied to this file and:
-      - ensure CampaignLeadProgress rows exist for all currently-eligible leads
-      - optionally schedule an immediate tick so calls start quickly
-    """
+    _lp("info", "trigger_campaign_refresh_for_file", file_id=file_id, and_tick=and_tick)
     campaigns = await Campaign.filter(
         file_id=file_id,
         status__in=[CampaignStatus.SCHEDULED, CampaignStatus.RUNNING],
@@ -1116,24 +1161,33 @@ async def trigger_campaign_refresh_for_file(file_id: int, and_tick: bool = True)
         total_added += added
         if and_tick:
             nudge_once(_tick_campaign, c.id, delay_seconds=1)
-            logger.debug("campaign %s: nudged immediate tick", c.id)
+            _lp("debug", "nudged immediate tick", campaign_id=c.id)
 
     return {"campaigns_checked": len(campaigns), "leads_added": total_added}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VAPI call placement (async, non-blocking)
+# VAPI call placement
 # ─────────────────────────────────────────────────────────────────────────────
 async def _place_vapi_call(user: User, assistant: Assistant, lead: Lead) -> str:
+    _lp("info", "_place_vapi_call: start", user_id=user.id, assistant_id=assistant.id, lead_id=lead.id)
     if not assistant.vapi_assistant_id:
+        print("Assistant has no VAPI ID")
         raise HTTPException(status_code=400, detail="Assistant has no VAPI ID")
     if not assistant.vapi_phone_uuid or not assistant.attached_Number:
+        print("Assistant has no attached phone number")
+
         raise HTTPException(status_code=400, detail="Assistant has no attached phone number")
 
     mobile_raw = (lead.mobile or "").strip()
     if not mobile_raw:
+        print("Lead has no mobile number")
+
         raise HTTPException(status_code=400, detail="Lead has no mobile number")
+
+    # Basic E.164 normalization (assumes US if no '+'). Adjust for your use case.
     number_e164 = mobile_raw if mobile_raw.startswith("+") else f"+1{mobile_raw}"
+    print("calling")
 
     payload = {
         "name": f"Campaign {assistant.name}",
@@ -1174,21 +1228,27 @@ async def _place_vapi_call(user: User, assistant: Assistant, lead: Lead) -> str:
     }
 
     headers = get_headers()
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        resp = await client.post("https://api.vapi.ai/call", json=payload, headers=headers)
+    print("call end")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            resp = await client.post("https://api.vapi.ai/call", json=payload, headers=headers)
+            print(f"Response: {resp.json()}")
+    except Exception as e:
+        _lp("error", "VAPI network error", err=repr(e))
+        raise HTTPException(status_code=502, detail=f"VAPI network error: {e}")
 
     if resp.status_code not in (200, 201):
         try:
             msg = resp.json().get("message", resp.text)
         except Exception:
             msg = resp.text
-        logger.error("VAPI error (%s): %s", resp.status_code, msg)
+        _lp("error", "VAPI http error", status=resp.status_code, msg=msg)
         raise HTTPException(status_code=resp.status_code, detail=f"VAPI error: {msg}")
 
     data = resp.json()
     call_id = data.get("id")
     if not call_id:
-        logger.error("VAPI response missing call ID: %s", data)
+        _lp("error", "VAPI response missing call ID", data=str(data))
         raise HTTPException(status_code=400, detail="VAPI response missing call ID")
 
     started_at = data.get("createdAt")
@@ -1203,17 +1263,16 @@ async def _place_vapi_call(user: User, assistant: Assistant, lead: Lead) -> str:
         lead_id=lead.id,
     )
 
-    logger.info("call placed: campaign_user=%s lead_id=%s number=%s call_id=%s",
-                user.id, lead.id, number_e164, call_id)
+    _lp("info", "call placed", user_id=user.id, lead_id=lead.id, number=number_e164, call_id=call_id)
 
-    # schedule details fetch (tz-aware)
-    processing_delay = min(120 + (10000 // 600), 1800)
+    processing_delay = min(120 + (10000 // 600), 1800)  # ~ up to 30m
     run_at = now_utc() + timedelta(seconds=processing_delay)
     get_scheduler().add_job(
         get_call_details,
         DateTrigger(run_date=run_at),
         args=[call_id, processing_delay, user.id, lead.id],
     )
+    _lp("debug", "scheduled get_call_details", call_id=call_id, run_at=run_at.isoformat())
 
     return call_id
 
@@ -1222,18 +1281,21 @@ async def _place_vapi_call(user: User, assistant: Assistant, lead: Lead) -> str:
 # Outcome processing
 # ─────────────────────────────────────────────────────────────────────────────
 async def _process_call_outcome(campaign_id: int, lead_id: int, user_id: int, call_id: str):
+    _lp("info", "_process_call_outcome: start", campaign_id=campaign_id, lead_id=lead_id, call_id=call_id)
     c = await Campaign.get_or_none(id=campaign_id)
     if not c:
+        _lp("warning", "campaign not found; abort outcome")
         return
     await c.fetch_related("assistant", "user")
 
     prog = await CampaignLeadProgress.get_or_none(campaign_id=campaign_id, lead_id=lead_id)
     if not prog:
+        _lp("warning", "progress row missing; abort outcome")
         return
 
     cl = await CallLog.get_or_none(call_id=call_id)
     if not cl:
-        # try again in 2 minutes
+        _lp("debug", "call log missing; retry outcome later")
         get_scheduler().add_job(
             _process_call_outcome,
             DateTrigger(run_date=now_utc() + timedelta(minutes=2)),
@@ -1247,48 +1309,53 @@ async def _process_call_outcome(campaign_id: int, lead_id: int, user_id: int, ca
 
     c = await Campaign.get_or_none(id=campaign_id)
     if not c:
+        _lp("warning", "campaign disappeared after fetch; abort")
         return
 
     if ended_reason in BUSY_REASONS and c.retry_on_busy and prog.attempt_count < c.max_attempts:
         prog.status = "retry_scheduled"
-        prog.next_attempt_at = datetime.utcnow() + timedelta(minutes=c.busy_retry_delay_minutes)  # DB likely naive
-        logger.info("campaign %s lead %s: scheduled retry in %s min",
-                    c.id, lead_id, c.busy_retry_delay_minutes)
+        prog.next_attempt_at = datetime.utcnow() + timedelta(minutes=c.busy_retry_delay_minutes)
+        _lp("info", "retry scheduled", lead_id=lead_id, minutes=c.busy_retry_delay_minutes)
     elif ended_reason in {"failed", "error"}:
         prog.status = "failed"
+        _lp("info", "marked failed", lead_id=lead_id)
 
     await prog.save()
+    _lp("debug", "_process_call_outcome: saved", status=prog.status, last_reason=prog.last_ended_reason)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Campaign ticking (cron)
 # ─────────────────────────────────────────────────────────────────────────────
 async def _tick_campaign(campaign_id: int):
-    now_aw = now_utc()      # tz-aware
+    _lp("info", "tick: start", campaign_id=campaign_id)
+    now_aw = now_utc()
     now_db = datetime.utcnow()  # naive for DB comparisons
 
     c = await Campaign.get_or_none(id=campaign_id)
     if not c:
+        _lp("warning", "tick: campaign not found", campaign_id=campaign_id)
         return
     await c.fetch_related("assistant", "user")
 
     if c.status not in {CampaignStatus.SCHEDULED, CampaignStatus.RUNNING}:
+        _lp("debug", "tick: status not runnable", status=c.status)
         return
 
-    # auto-absorb new leads
     try:
         added = await _ensure_progress_rows(c)
         if added:
-            logger.info("campaign %s: auto-synced %d new lead(s)", c.id, added)
+            _lp("info", "tick: auto-synced new leads", added=added)
     except Exception as e:
-        logger.exception("campaign %s: sync error: %r", c.id, e)
+        _lp("error", "tick: sync error", err=repr(e))
 
     if not _within_window(c, now_aw):
-        logger.debug("campaign %s: outside window at %s", c.id, now_aw.isoformat())
+        _lp("debug", "tick: outside window", now=now_aw.isoformat())
         return
 
     batch = max(1, min(c.calls_per_minute, 50))
     parallel = max(1, min(c.parallel_calls, 10))
+    _lp("debug", "tick: pacing", batch=batch, parallel=parallel)
 
     q = CampaignLeadProgress.filter(
         campaign_id=c.id,
@@ -1304,26 +1371,29 @@ async def _tick_campaign(campaign_id: int):
         if remaining == 0:
             c.status = CampaignStatus.COMPLETED
             await c.save()
-            logger.info("campaign %s: completed (no remaining leads)")
+            _lp("info", "tick: completed campaign; no remaining leads")
+        else:
+            _lp("debug", "tick: nothing to do this minute", remaining=remaining)
         return
 
     sem = asyncio.Semaphore(parallel)
 
     async def _one(prog: CampaignLeadProgress):
         async with sem:
+            _lp("debug", "tick: handle lead", lead_id=prog.lead_id, attempt=prog.attempt_count + 1)
             lead = await Lead.get_or_none(id=prog.lead_id)
             if not lead:
                 prog.status = "failed"
                 prog.last_ended_reason = "error:lead-missing"
                 await prog.save()
-                logger.warning("campaign %s: lead %s missing; marked failed", c.id, prog.lead_id)
+                _lp("warning", "lead missing -> failed", lead_id=prog.lead_id)
                 return
 
             if lead.dnc:
                 prog.status = "skipped"
                 prog.last_ended_reason = "skipped:dnc"
                 await prog.save()
-                logger.info("campaign %s: lead %s skipped (DNC)", c.id, prog.lead_id)
+                _lp("info", "lead DNC -> skipped", lead_id=prog.lead_id)
                 return
 
             try:
@@ -1331,44 +1401,44 @@ async def _tick_campaign(campaign_id: int):
                 prog.attempt_count += 1
                 prog.last_attempt_at = datetime.utcnow()  # DB naive
                 await prog.save()
+                _lp("debug", "placing call", lead_id=prog.lead_id)
 
                 call_id = await _place_vapi_call(c.user, c.assistant, lead)
                 prog.last_call_id = call_id
                 await prog.save()
+                _lp("info", "call placed (tick)", lead_id=prog.lead_id, call_id=call_id)
 
                 get_scheduler().add_job(
                     _process_call_outcome,
                     DateTrigger(run_date=now_utc() + timedelta(minutes=12)),
                     args=[c.id, lead.id, c.user.id, call_id],
                 )
-                logger.debug("campaign %s: scheduled outcome processing for lead %s (call %s)",
-                             c.id, lead.id, call_id)
+                _lp("debug", "scheduled outcome processing", in_minutes=12)
 
             except HTTPException as e:
                 detail = str(e.detail).lower()
                 prog.status = "skipped" if ("no mobile" in detail or "mobile number" in detail) else "failed"
                 prog.last_ended_reason = f"error:{e.detail}"
                 await prog.save()
-                logger.warning("campaign %s: lead %s error => %s", c.id, lead.id, detail)
+                _lp("warning", "lead error", lead_id=prog.lead_id, detail=detail)
             except Exception as e:
                 prog.status = "failed"
                 prog.last_ended_reason = f"error:{repr(e)}"
                 await prog.save()
-                logger.exception("campaign %s: lead %s unexpected error", c.id, lead.id)
+                _lp("error", "unexpected error during call", lead_id=prog.lead_id, err=repr(e))
 
     await asyncio.gather(*[_one(p) for p in todo])
 
     c.last_tick_at = datetime.utcnow()  # DB naive
     c.status = CampaignStatus.RUNNING
     await c.save()
-    logger.info("campaign %s: tick complete - placed %d call(s)", c.id, len(todo))
+    _lp("info", "tick: complete", placed=len(todo))
 
 
 def _schedule_campaign_job(campaign_id: int, timezone: str):
     job_id = f"campaign:{campaign_id}"
-    # Replaces existing minute job with a fresh one in the correct timezone
     schedule_minutely_job(job_id, timezone, _tick_campaign, campaign_id)
-    logger.info("campaign %s: scheduled */1 min ticker (tz=%s)", campaign_id, timezone or "UTC")
+    _lp("info", "scheduled */1 min ticker", campaign_id=campaign_id, tz=timezone or "UTC")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1377,15 +1447,20 @@ def _schedule_campaign_job(campaign_id: int, timezone: str):
 @router.post("/campaigns")
 async def create_campaign(payload: CampaignCreatePayload,
                           user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "create_campaign: start", user_id=user.id, payload=payload.model_dump())
+
     file = await FileModel.get_or_none(id=payload.file_id, user_id=user.id)
     if not file:
+        _lp("warning", "create_campaign: file not found", file_id=payload.file_id, user_id=user.id)
         raise HTTPException(status_code=404, detail="File not found for this user")
 
     assistant = await Assistant.get_or_none(id=payload.assistant_id, user_id=user.id)
     if not assistant:
+        _lp("warning", "create_campaign: assistant not found", assistant_id=payload.assistant_id)
         raise HTTPException(status_code=404, detail="Assistant not found")
 
     if not assistant.vapi_assistant_id or not assistant.vapi_phone_uuid:
+        _lp("warning", "create_campaign: assistant missing VAPI config")
         raise HTTPException(status_code=400, detail="Assistant must have VAPI ID and attached number")
 
     c = await Campaign.create(
@@ -1413,17 +1488,18 @@ async def create_campaign(payload: CampaignCreatePayload,
     added = await _ensure_progress_rows(c)
     _schedule_campaign_job(c.id, c.timezone)
 
-    logger.info("campaign %s created by user %s; queued=%d", c.id, user.id, added)
+    _lp("info", "create_campaign: created", campaign_id=c.id, queued=added)
 
     return {
         "success": True,
         "campaign_id": c.id,
-        "detail": f"Campaign created. {added} lead(s) queued."
+        "detail": f"Campaign created. {added} lead(s) queued.",
     }
 
 
 @router.get("/campaigns")
 async def list_campaigns(user: Annotated[User, Depends(get_current_user)]):
+    _lp("debug", "list_campaigns", user_id=user.id)
     cs = await Campaign.filter(user_id=user.id).order_by("-created_at").all()
     out = []
     for c in cs:
@@ -1454,6 +1530,7 @@ async def list_campaigns(user: Annotated[User, Depends(get_current_user)]):
 
 @router.get("/campaigns/{campaign_id}")
 async def get_campaign(campaign_id: int, user: Annotated[User, Depends(get_current_user)]):
+    _lp("debug", "get_campaign", campaign_id=campaign_id, user_id=user.id)
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1491,13 +1568,14 @@ async def get_campaign(campaign_id: int, user: Annotated[User, Depends(get_curre
             "pending": pending,
             "retry": retrying,
             "calling": calling,
-            "done": done
-        }
+            "done": done,
+        },
     }
 
 
 @router.get("/campaigns/{campaign_id}/stats")
 async def campaign_stats(campaign_id: int, user: Annotated[User, Depends(get_current_user)]):
+    _lp("debug", "campaign_stats", campaign_id=campaign_id, user_id=user.id)
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1505,7 +1583,6 @@ async def campaign_stats(campaign_id: int, user: Annotated[User, Depends(get_cur
     now_aw = now_utc()
     tz = pytz.timezone(c.timezone or "UTC")
 
-    # segment counts
     total = await CampaignLeadProgress.filter(campaign_id=c.id).count()
     pending = await CampaignLeadProgress.filter(campaign_id=c.id, status="pending").count()
     retrying = await CampaignLeadProgress.filter(campaign_id=c.id, status="retry_scheduled").count()
@@ -1514,23 +1591,18 @@ async def campaign_stats(campaign_id: int, user: Annotated[User, Depends(get_cur
         campaign_id=c.id, status__in=["completed", "failed", "skipped"]
     ).count()
 
-    # progress percent
     pct = int(round((done / total) * 100)) if total > 0 else 0
 
-    # next tick (from APScheduler job, if any)
     sch = get_scheduler()
     job = sch.get_job(f"campaign:{campaign_id}")
     next_tick_at = job.next_run_time if job else None
 
-    # eligible backlog now (DB naive time for comparisons)
     eligible_now = await CampaignLeadProgress.filter(
         campaign_id=c.id,
         status__in=["pending", "retry_scheduled"]
     ).filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=datetime.utcnow())).count()
 
-    active_now = _within_window(c, now_aw) and c.status in {
-        CampaignStatus.SCHEDULED, CampaignStatus.RUNNING
-    }
+    active_now = _within_window(c, now_aw) and c.status in {CampaignStatus.SCHEDULED, CampaignStatus.RUNNING}
 
     return {
         "id": c.id,
@@ -1563,16 +1635,14 @@ async def campaign_stats(campaign_id: int, user: Annotated[User, Depends(get_cur
             "done": done,
         },
         "percent_complete": pct,
-        "counts": {  # convenience mirror for your cards
-            "total": total,
-            "done": done,
-        },
+        "counts": {"total": total, "done": done},
         "eligible_now": eligible_now,
     }
 
 
 @router.delete("/campaigns/{campaign_id}")
 async def delete_campaign(campaign_id: int, user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "delete_campaign: start", campaign_id=campaign_id, user_id=user.id)
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1581,10 +1651,11 @@ async def delete_campaign(campaign_id: int, user: Annotated[User, Depends(get_cu
     job = sch.get_job(f"campaign:{campaign_id}")
     if job:
         job.remove()
+        _lp("debug", "delete_campaign: job removed", job_id=job.id)
 
     await CampaignLeadProgress.filter(campaign_id=campaign_id).delete()
     await c.delete()
-    logger.info("campaign %s: deleted", campaign_id)
+    _lp("info", "delete_campaign: done", campaign_id=campaign_id)
     return {"success": True, "detail": "Campaign deleted"}
 
 
@@ -1592,6 +1663,7 @@ async def delete_campaign(campaign_id: int, user: Annotated[User, Depends(get_cu
 async def update_schedule(campaign_id: int,
                           payload: CampaignUpdateSchedulePayload,
                           user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "update_schedule: start", campaign_id=campaign_id, payload=payload.model_dump())
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1612,7 +1684,7 @@ async def update_schedule(campaign_id: int,
     await c.save()
     _schedule_campaign_job(c.id, c.timezone)
     added = await _ensure_progress_rows(c)
-    logger.info("campaign %s: schedule updated; queued_new=%d", c.id, added)
+    _lp("info", "update_schedule: done", campaign_id=campaign_id, queued_new=added)
     return {"success": True, "detail": "Schedule updated"}
 
 
@@ -1620,6 +1692,7 @@ async def update_schedule(campaign_id: int,
 async def update_retry(campaign_id: int,
                        payload: RetryPolicyPayload,
                        user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "update_retry: start", campaign_id=campaign_id, payload=payload.model_dump())
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1628,23 +1701,25 @@ async def update_retry(campaign_id: int,
     c.busy_retry_delay_minutes = payload.busy_retry_delay_minutes
     c.max_attempts = payload.max_attempts
     await c.save()
-    logger.info("campaign %s: retry policy updated", c.id)
+    _lp("info", "update_retry: saved", campaign_id=campaign_id)
     return {"success": True, "detail": "Retry policy updated"}
 
 
 @router.post("/campaigns/{campaign_id}/pause")
 async def pause_campaign(campaign_id: int, user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "pause_campaign", campaign_id=campaign_id, user_id=user.id)
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
     c.status = CampaignStatus.PAUSED
     await c.save()
-    logger.info("campaign %s: paused", c.id)
+    _lp("info", "pause_campaign: saved", status=c.status)
     return {"success": True, "detail": "Campaign paused"}
 
 
 @router.post("/campaigns/{campaign_id}/resume")
 async def resume_campaign(campaign_id: int, user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "resume_campaign", campaign_id=campaign_id, user_id=user.id)
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1652,12 +1727,13 @@ async def resume_campaign(campaign_id: int, user: Annotated[User, Depends(get_cu
     await c.save()
     _schedule_campaign_job(c.id, c.timezone)
     added = await _ensure_progress_rows(c)
-    logger.info("campaign %s: resumed; queued_new=%d", c.id, added)
+    _lp("info", "resume_campaign: done", queued_new=added)
     return {"success": True, "detail": "Campaign resumed"}
 
 
 @router.post("/campaigns/{campaign_id}/stop")
 async def stop_campaign(campaign_id: int, user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "stop_campaign", campaign_id=campaign_id, user_id=user.id)
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1668,14 +1744,16 @@ async def stop_campaign(campaign_id: int, user: Annotated[User, Depends(get_curr
     job = sch.get_job(f"campaign:{campaign_id}")
     if job:
         job.remove()
+        _lp("debug", "stop_campaign: job removed", job_id=job.id)
 
-    logger.info("campaign %s: stopped", c.id)
+    _lp("info", "stop_campaign: saved")
     return {"success": True, "detail": "Campaign stopped"}
 
 
 @router.post("/campaigns/{campaign_id}/run-now")
 async def run_now(campaign_id: int, payload: RunNowPayload,
                   user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "run_now: start", campaign_id=campaign_id, payload=payload.model_dump())
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1688,6 +1766,7 @@ async def run_now(campaign_id: int, payload: RunNowPayload,
     ).order_by("id").limit(payload.batch_size).all()
 
     if not todo:
+        _lp("debug", "run_now: no eligible leads")
         return {"success": True, "detail": "No eligible leads to call right now."}
 
     placed = 0
@@ -1697,12 +1776,14 @@ async def run_now(campaign_id: int, payload: RunNowPayload,
             prog.status = "failed"
             prog.last_ended_reason = "error:lead-missing"
             await prog.save()
+            _lp("warning", "run_now: lead missing", lead_id=prog.lead_id)
             continue
 
         if lead.dnc:
             prog.status = "skipped"
             prog.last_ended_reason = "skipped:dnc"
             await prog.save()
+            _lp("info", "run_now: lead DNC -> skipped", lead_id=prog.lead_id)
             continue
 
         try:
@@ -1715,6 +1796,7 @@ async def run_now(campaign_id: int, payload: RunNowPayload,
             prog.last_call_id = call_id
             await prog.save()
             placed += 1
+            _lp("info", "run_now: call placed", lead_id=prog.lead_id, call_id=call_id)
 
             get_scheduler().add_job(
                 _process_call_outcome,
@@ -1725,22 +1807,23 @@ async def run_now(campaign_id: int, payload: RunNowPayload,
             prog.status = "failed"
             prog.last_ended_reason = f"error:{repr(e)}"
             await prog.save()
+            _lp("error", "run_now: unexpected error", err=repr(e))
 
-    logger.info("campaign %s: run-now placed %d call(s)", c.id, placed)
+    _lp("info", "run_now: finish", placed=placed)
     return {"success": True, "detail": f"Triggered {placed} lead(s) now."}
 
 
 @router.post("/campaigns/{campaign_id}/refresh-leads")
 async def refresh_campaign_leads(campaign_id: int, user: Annotated[User, Depends(get_current_user)]):
+    _lp("info", "refresh_campaign_leads: start", campaign_id=campaign_id)
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
 
     added = await _ensure_progress_rows(c)
 
-    # kick near-immediate tick
     nudge_once(_tick_campaign, c.id, delay_seconds=1)
-    logger.info("campaign %s: refresh-leads queued_new=%d and nudged", c.id, added)
+    _lp("info", "refresh_campaign_leads: nudged", added=added)
 
     return {"success": True, "detail": f"Synced {added} new lead(s)."}
 
@@ -1748,13 +1831,13 @@ async def refresh_campaign_leads(campaign_id: int, user: Annotated[User, Depends
 # ─────────────────────────────────────────────────────────────────────────────
 # iCalendar export
 # ─────────────────────────────────────────────────────────────────────────────
+
 def _ics_for_campaign(c: Campaign) -> str:
     tz = c.timezone or "UTC"
     map_rr = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
     byday = ",".join(map_rr.get(d, "MO") for d in (c.days_of_week or [0, 1, 2, 3, 4]))
 
-    import pytz as _pytz
-    zone = _pytz.timezone(tz)
+    zone = pytz.timezone(tz)
     now_local = datetime.now(zone)
     hh, mm = (c.daily_start or "09:00").split(":")
     start_local = (c.start_at.astimezone(zone) if c.start_at else now_local).replace(
@@ -1783,6 +1866,7 @@ def _ics_for_campaign(c: Campaign) -> str:
 
 @router.get("/campaigns/{campaign_id}/calendar.ics")
 async def campaign_calendar_ics(campaign_id: int, user: Annotated[User, Depends(get_current_user)]):
+    _lp("debug", "calendar.ics", campaign_id=campaign_id)
     c = await Campaign.get_or_none(id=campaign_id, user_id=user.id)
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1799,11 +1883,8 @@ async def campaign_calendar_ics(campaign_id: int, user: Annotated[User, Depends(
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/debug/scheduler")
 async def scheduler_jobs():
-    """
-    Inspect jobs currently registered in APScheduler.
-    """
     jobs = get_scheduler().get_jobs()
-    return [
+    payload = [
         {
             "id": j.id,
             "name": getattr(j, "name", None),
@@ -1811,12 +1892,12 @@ async def scheduler_jobs():
         }
         for j in jobs
     ]
+    _lp("debug", "scheduler_jobs", count=len(payload))
+    return payload
 
 
 @router.post("/debug/tick/{campaign_id}")
 async def debug_tick(campaign_id: int):
-    """
-    Force a one-off tick for a campaign (fires in ~1s).
-    """
     nudge_once(_tick_campaign, campaign_id, delay_seconds=1)
+    _lp("info", "debug_tick: nudged", campaign_id=campaign_id)
     return {"success": True, "detail": f"Tick scheduled for campaign {campaign_id} in ~1s"}
