@@ -57,7 +57,8 @@
 
 
 
-
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI
 from controllers import (
     assistant_controller,

@@ -444,7 +444,7 @@ vapi_api_key = os.environ["VAPI_API_KEY"]
 vapi_org_id = os.environ.get("VAPI_ORG_ID", "")
 
 # where your API is publicly reachable (ngrok)
-API_PUBLIC_BASE = os.getenv("API_PUBLIC_BASE", "https://c57a8e025f6a.ngrok-free.app")
+API_PUBLIC_BASE = os.getenv("API_PUBLIC_BASE", "https://aisdr-dbt.ddns.net")
 # shared secret used by the Vapi tool → your backend
 APPOINTMENT_TOOL_SECRET = os.getenv("APPOINTMENT_TOOL_SECRET", "change-me")
 # if you already created the tool manually in Vapi UI, you can pin it here
