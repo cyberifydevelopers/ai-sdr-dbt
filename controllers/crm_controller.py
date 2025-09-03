@@ -863,10 +863,6 @@
 
 
 
-
-
-
-
 import os
 import secrets
 import logging
@@ -875,7 +871,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import urlparse, urlencode, urlsplit, urlunsplit, parse_qsl, quote_plus
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, BackgroundTasks
 from fastapi.responses import RedirectResponse, JSONResponse
 
 from helpers.token_helper import get_current_user
@@ -888,11 +884,7 @@ router = APIRouter()
 logger = logging.getLogger("crm")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Config (only HubSpot + GHL)
-#   Tip: For GHL, copy the Marketplace **Install link** into GHL_INSTALL_URL.
-#   It already contains client_id, redirect_uri, scope, response_type=code.
-#   We will simply append &state=... at runtime.
-#   Fallback: if GHL_INSTALL_URL is not provided, we build it from parts.
+# Config (HubSpot + GHL + MONDAY)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cfg() -> Dict[str, Dict[str, str]]:
@@ -911,12 +903,9 @@ def _cfg() -> Dict[str, Dict[str, str]]:
             "type": "oauth",
         },
         "ghl": {
-            # Preferred: full Marketplace "Install link"
             "install_url": os.getenv("GHL_INSTALL_URL", ""),
-            # Fallback pieces if you don't want to paste full install URL:
             "install_base": os.getenv("GHL_INSTALL_BASE", "https://marketplace.gohighlevel.com"),
             "auth_path": "/oauth/chooselocation",
-            # OAuth token + API hosts are always services.leadconnectorhq.com
             "token_url": os.getenv("GHL_TOKEN_URL", "https://services.leadconnectorhq.com/oauth/token"),
             "contacts_url": os.getenv("GHL_CONTACTS_URL", "https://services.leadconnectorhq.com/contacts/"),
             "client_id": os.getenv("GHL_CLIENT_ID", ""),
@@ -925,9 +914,29 @@ def _cfg() -> Dict[str, Dict[str, str]]:
             "scope": os.getenv("GHL_SCOPES", "contacts.readonly contacts.write"),
             "type": "oauth",
         },
+        # MONDAY: OAuth & GraphQL API
+        "monday": {
+            "auth_url": os.getenv("MONDAY_AUTH_URL", "https://auth.monday.com/oauth2/authorize"),
+            "token_url": os.getenv("MONDAY_TOKEN_URL", "https://auth.monday.com/oauth2/token"),
+            "api_url": os.getenv("MONDAY_API_URL", "https://api.monday.com/v2"),
+            "client_id": os.getenv("MONDAY_CLIENT_ID", ""),
+            "client_secret": os.getenv("MONDAY_CLIENT_SECRET", ""),
+            "redirect_uri": os.getenv("MONDAY_REDIRECT_URI", ""),
+            "scope": os.getenv("MONDAY_SCOPES", ""),  
+            # optional board-based contacts:
+            "board_id": os.getenv("MONDAY_BOARD_ID", ""),
+            "email_col": os.getenv("MONDAY_EMAIL_COLUMN_ID", ""),
+            "phone_col": os.getenv("MONDAY_PHONE_COLUMN_ID", ""),
+            "state_col": os.getenv("MONDAY_STATE_COLUMN_ID", ""),
+            # subdomain targeting + install behavior
+            "subdomain": os.getenv("MONDAY_SUBDOMAIN", ""),  # e.g. "aisdrdbt"
+            "subdomain_strategy": os.getenv("MONDAY_SUBDOMAIN_STRATEGY", "param"),  # "param" | "host"
+            "force_install_if_needed": (os.getenv("MONDAY_FORCE_INSTALL_IF_NEEDED", "false") or "").lower() == "true",
+            "type": "oauth",
+        },
     }
 
-SUPPORTED = ("hubspot", "ghl")
+SUPPORTED = ("hubspot", "ghl", "monday")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -937,11 +946,9 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 def _exp_from_seconds(seconds: int) -> datetime:
-    # subtract a minute as safety skew
     return _now() + timedelta(seconds=max(0, seconds - 60))
 
 def _sanitize_redirect(back: str) -> str:
-    """Prevent open-redirects: allow only same-site relative paths or whitelisted origins via env."""
     if back and back.startswith("/") and not back.startswith("//"):
         return back
     allowed = set((os.getenv("ALLOWED_REDIRECT_ORIGINS") or "").split(",")) - {""}
@@ -953,7 +960,6 @@ def _sanitize_redirect(back: str) -> str:
     return "/user/CRM"
 
 def _append_qs(url: str, params: Dict[str, str]) -> str:
-    """Append query params to any URL."""
     parts = list(urlsplit(url))
     q = dict(parse_qsl(parts[3], keep_blank_values=True))
     q.update({k: v for k, v in params.items() if v is not None})
@@ -961,7 +967,7 @@ def _append_qs(url: str, params: Dict[str, str]) -> str:
     return urlunsplit(parts)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Token verification (lightweight probes)
+# Token verification
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
@@ -980,7 +986,6 @@ async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
                 logger.info("hubspot verify ok hub_id=%s user=%s",
                             acc.external_account_id, acc.external_account_name)
             else:
-                # fallback: owners endpoint with Bearer
                 r2 = await client.get(
                     "https://api.hubapi.com/crm/v3/owners?limit=1",
                     headers={"Authorization": f"Bearer {acc.access_token}", "Accept": "application/json"},
@@ -990,7 +995,6 @@ async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
                     raise HTTPException(401, "HubSpot token validation failed.")
 
         elif crm == "ghl":
-            # Probe the Contacts list with limit=1. This is stable and simple.
             contacts_url = _cfg()["ghl"]["contacts_url"].rstrip("/")
             probe = f"{contacts_url}?limit=1"
             r = await client.get(
@@ -1007,6 +1011,40 @@ async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
             acc.external_account_name = acc.external_account_name or "GHL"
             logger.info("GHL verify ok")
 
+        elif crm == "monday":
+            # Probe with GraphQL `me`
+            q = """
+            query {
+              me {
+                id
+                name
+                email
+                account { id name }
+              }
+            }
+            """
+            r = await client.post(
+                _cfg()["monday"]["api_url"],
+                headers={
+                    "Authorization": f"Bearer {acc.access_token}",
+                    "Content-Type": "application/json",
+                },
+                json={"query": q},
+            )
+            if not r.is_success:
+                logger.error("monday verify failed: %s %s", r.status_code, r.text[:200])
+                raise HTTPException(401, "monday token validation failed.")
+            j = r.json()
+            me = ((j or {}).get("data") or {}).get("me") or {}
+            if not me:
+                logger.error("monday verify: empty `me`")
+                raise HTTPException(401, "monday token validation failed.")
+            acct = me.get("account") or {}
+            acc.external_account_id = str(acct.get("id") or "")
+            acc.external_account_name = acct.get("name") or me.get("email") or me.get("name") or "monday"
+            logger.info("monday verify ok account_id=%s name=%s",
+                        acc.external_account_id, acc.external_account_name)
+
         else:
             raise HTTPException(400, "Unsupported CRM for verification")
 
@@ -1020,8 +1058,8 @@ async def _ensure_fresh_token(crm: str, acc: IntegrationAccount) -> IntegrationA
         return acc
 
     cfg = _cfg()[crm]
+    # MONDAY: tokens do not expire and no refresh_token is issued.
     if not acc.refresh_token:
-        # Some installs issue long-lived tokens.
         logger.debug("%s: no refresh_token present; assuming still valid", crm)
         return acc
 
@@ -1092,8 +1130,9 @@ async def start_connect(
 ):
     """
     Starts OAuth:
-      • HubSpot: build standard authorize URL.
-      • GHL: use Marketplace Install link (recommended) or build from parts.
+      • HubSpot: standard authorize URL.
+      • GHL: Marketplace Install link or build from parts.
+      • monday: standard OAuth authorize URL with optional subdomain targeting.
     """
     crm = crm.lower()
     if crm not in SUPPORTED:
@@ -1118,14 +1157,11 @@ async def start_connect(
         }
         auth_url = f'{cfg["auth_url"]}?{httpx.QueryParams(params)}'
 
-    else:  # GHL
+    elif crm == "ghl":
         install_url = (cfg["install_url"] or "").strip()
         if install_url:
-            # Append &state=... to the marketplace install link.
             auth_url = _append_qs(install_url, {"state": state})
         else:
-            # Build an install URL (identical shape to the marketplace link).
-            # This goes to /oauth/chooselocation on the marketplace host.
             built = f'{cfg["install_base"].rstrip("/")}{cfg["auth_path"]}'
             params = {
                 "response_type": "code",
@@ -1136,6 +1172,35 @@ async def start_connect(
             }
             auth_url = f"{built}?{urlencode(params)}"
 
+    else:  # MONDAY
+        params = {
+            "client_id": cfg["client_id"],
+            "redirect_uri": cfg["redirect_uri"],
+            "response_type": "code",
+            "state": state,
+        }
+        # Optional explicit scopes (if provided) – otherwise Monday uses app-configured scopes
+        if cfg.get("scope"):
+            params["scope"] = cfg["scope"]
+        # Optionally nudge Monday to install app first if missing
+        if cfg.get("force_install_if_needed"):
+            params["force_install_if_needed"] = "true"
+
+        sub = (cfg.get("subdomain") or "").strip()
+        strat = (cfg.get("subdomain_strategy") or "param").lower()
+
+        if sub:
+            if strat == "host":
+                # Soft default: user can still change the account
+                base = f"https://{sub}.monday.com/oauth2/authorize"
+                auth_url = f"{base}?{httpx.QueryParams(params)}"
+            else:
+                # Hard lock: force a specific account
+                params["subdomain"] = sub
+                auth_url = f'{cfg["auth_url"]}?{httpx.QueryParams(params)}'
+        else:
+            auth_url = f'{cfg["auth_url"]}?{httpx.QueryParams(params)}'
+
     logger.info("oauth start crm=%s user=%s state=%s", crm, user.id, state)
     return {"auth_url": auth_url}
 
@@ -1145,6 +1210,7 @@ async def oauth_callback(
     code: Optional[str] = Query(None),
     state: Optional[str] = Query(None),
     error: Optional[str] = Query(None),
+    background_tasks: BackgroundTasks = None,
 ):
     crm = crm.lower()
     if crm not in SUPPORTED:
@@ -1196,8 +1262,13 @@ async def oauth_callback(
             return default
 
     acc.access_token = j.get("access_token")
-    acc.refresh_token = j.get("refresh_token") or acc.refresh_token
-    acc.expires_at = _exp_from_seconds(_as_int(j.get("expires_in", 3600)))
+    # MONDAY: no refresh token & tokens do not expire
+    if crm == "monday":
+        acc.refresh_token = None
+        acc.expires_at = None
+    else:
+        acc.refresh_token = j.get("refresh_token") or acc.refresh_token
+        acc.expires_at = _exp_from_seconds(_as_int(j.get("expires_in", 3600)))
     await acc.save()
 
     try:
@@ -1210,8 +1281,14 @@ async def oauth_callback(
 
     acc.is_active = True
     await acc.save()
+
+    # Auto-ingest Monday leads right after successful auth (non-blocking)
+    if crm == "monday" and background_tasks is not None:
+        user_obj = await User.get(id=st.user_id)
+        background_tasks.add_task(_sync_one_crm, user_obj, "monday")
+
     await st.delete()
-    logger.info("oauth success crm=%s user=%s", crm, st.user_id)
+    logger.info("oauth success crm=%s user=%s", crm, acc.user_id if hasattr(acc, "user_id") else st.user_id)
     return RedirectResponse(url=f"{back}?crm={crm}&status=success")
 
 @router.delete("/crm/disconnect/{crm}")
@@ -1302,12 +1379,11 @@ async def fetch_contacts(
             next_cursor = ((j.get("paging") or {}).get("next") or {}).get("after")
             raw_paging = j.get("paging") or {}
 
-        else:  # GHL
+        elif crm == "ghl":
             contacts_url = _cfg()["ghl"]["contacts_url"].rstrip("/")
             url = contacts_url
             params = {"limit": limit}
             if cursor:
-                # Accept common paging key names and let API ignore extras
                 params.update({"cursor": cursor, "nextPageToken": cursor, "page": cursor})
 
             r = await client.get(
@@ -1319,7 +1395,6 @@ async def fetch_contacts(
                 raise HTTPException(r.status_code, f"GHL contacts fetch failed: {r.text[:300]}")
             j = r.json() if r.text else {}
 
-            # Common response shapes: {contacts: [...]}, {data: [...]}, {items: [...]}, [...]
             data_list = None
             for key in ("contacts", "data", "items", "results"):
                 if isinstance(j.get(key), list):
@@ -1343,7 +1418,6 @@ async def fetch_contacts(
                 )
                 items.append(_norm(cid, full or None, email, phone, state, c))
 
-            # Flexible paging detection
             if isinstance(j.get("meta"), dict):
                 meta = j["meta"]
                 raw_paging["meta"] = meta
@@ -1358,6 +1432,106 @@ async def fetch_contacts(
                     if j.get(k):
                         next_cursor = str(j.get(k))
                         break
+
+        else:  # MONDAY
+            cfgm = _cfg()["monday"]
+            api_url = cfgm["api_url"]
+
+            # If board_id is configured, use items_page on that board. Otherwise, fallback to account users.
+            board_id = (cfgm.get("board_id") or "").strip()
+            headers = {
+                "Authorization": f"Bearer {acc.access_token}",
+                "Content-Type": "application/json",
+            }
+
+            if board_id:
+                # items_page with cursor-based pagination (limit up to 500; we honor <=100 like others)
+                q = """
+                query($board_id: [ID!], $limit: Int!, $cursor: String) {
+                  boards (ids: $board_id) {
+                    items_page (limit: $limit, cursor: $cursor) {
+                      cursor
+                      items {
+                        id
+                        name
+                        column_values {
+                          id
+                          text
+                          value
+                          column { id type title }
+                        }
+                      }
+                    }
+                  }
+                }
+                """
+                vars_ = {
+                    "board_id": [int(board_id)],
+                    "limit": int(limit),
+                    "cursor": cursor if cursor not in (None, "", "null") else None,
+                }
+                r = await client.post(api_url, headers=headers, json={"query": q, "variables": vars_})
+                if not r.is_success:
+                    raise HTTPException(r.status_code, f"monday items_page failed: {r.text[:300]}")
+                j = r.json() or {}
+                boards = (((j.get("data") or {}).get("boards")) or [])
+                page = (boards[0].get("items_page") if boards else None) or {}
+                next_cursor = page.get("cursor")
+                raw_paging["cursor"] = next_cursor
+
+                email_col = (cfgm.get("email_col") or "").strip()
+                phone_col = (cfgm.get("phone_col") or "").strip()
+                state_col = (cfgm.get("state_col") or "").strip()
+
+                for it in (page.get("items") or []):
+                    name = it.get("name")
+                    email = None
+                    phone = None
+                    state = None
+                    # extract by configured column ids first, else by type
+                    for cv in (it.get("column_values") or []):
+                        cid = str(cv.get("id") or "")
+                        ctype = ((cv.get("column") or {}).get("type") or "").lower()
+                        text = cv.get("text")
+                        # prefer configured ids
+                        if email is None and (email_col and cid == email_col or (not email_col and ctype == "email")):
+                            email = text or email
+                        if phone is None and (phone_col and cid == phone_col or (not phone_col and ctype == "phone")):
+                            phone = text or phone
+                        if state is None and (state_col and cid == state_col):
+                            state = text or state
+                    items.append(_norm(it.get("id"), name, email, phone, state, it))
+
+            else:
+                # fallback: list users (paged by page number)
+                # Convert our opaque cursor into a simple page integer
+                page_num = 1
+                try:
+                    if cursor not in (None, "", "null"):
+                        page_num = max(1, int(str(cursor)))
+                except Exception:
+                    page_num = 1
+
+                q = """
+                query($limit: Int!, $page: Int) {
+                  users (limit: $limit, page: $page) {
+                    id
+                    name
+                    email
+                  }
+                }
+                """
+                vars_ = {"limit": int(limit), "page": page_num}
+                r = await client.post(api_url, headers=headers, json={"query": q, "variables": vars_})
+                if not r.is_success:
+                    raise HTTPException(r.status_code, f"monday users fetch failed: {r.text[:300]}")
+                j = r.json() or {}
+                users_ = ((j.get("data") or {}).get("users")) or []
+                for u in users_:
+                    items.append(_norm(u.get("id"), u.get("name"), u.get("email"), None, None, u))
+                # very simple paging heuristic: next page if we filled the page
+                next_cursor = str(page_num + 1) if len(users_) >= int(limit) else None
+                raw_paging["page"] = page_num
 
     logger.info("contacts fetched crm=%s items=%s next=%s", crm, len(items), bool(next_cursor))
     return {"items": items, "next_cursor": next_cursor, "raw_paging": raw_paging}
@@ -1405,16 +1579,11 @@ async def _ensure_file(user: User, name: str) -> FileModel:
     return file
 
 async def _upsert_lead_from_contact(file: FileModel, item: Dict[str, Any], crm: str) -> Tuple[bool, bool]:
-    """
-    Upsert a Lead from a normalized contact item.
-    Uses (file_id, salesforce_id=<external id>) to dedupe.
-    Returns (created, updated).
-    """
     full_name = item.get("name")
     first, last = _split_name(full_name)
     email = item.get("email")
     phone = _clean_phone(item.get("phone"))
-    external_id = item.get("id")  # store in salesforce_id field as "external id"
+    external_id = item.get("id")
     state = item.get("state")
     raw = item.get("raw") or {}
     company = (
@@ -1459,7 +1628,7 @@ async def _upsert_lead_from_contact(file: FileModel, item: Dict[str, Any], crm: 
     return (True, False)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sync endpoints (per-CRM + generic)
+# Sync endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _sync_one_crm(user: User, crm: str) -> Dict[str, Any]:
@@ -1470,7 +1639,8 @@ async def _sync_one_crm(user: User, crm: str) -> Dict[str, Any]:
     if not acc:
         raise HTTPException(404, f"Not connected to {crm}.")
 
-    label = "HubSpot" if crm == "hubspot" else "GHL"
+    label_map = {"hubspot": "HubSpot", "ghl": "GHL", "monday": "Monday"}
+    label = label_map.get(crm, crm)
     file_name = f"{label} Leads"
 
     file = await _ensure_file(user, file_name)
@@ -1504,25 +1674,30 @@ async def _sync_one_crm(user: User, crm: str) -> Dict[str, Any]:
 
 @router.post("/crm/ingest/hubspot")
 async def ingest_hubspot(user: User = Depends(get_current_user)):
-    """Create/Update 'HubSpot Leads' and pull all contacts into it."""
     out = await _sync_one_crm(user, "hubspot")
     return {"success": True, "details": [out]}
 
 @router.post("/crm/ingest/ghl")
 async def ingest_ghl(user: User = Depends(get_current_user)):
-    """Create/Update 'GHL Leads' and pull all contacts into it."""
     out = await _sync_one_crm(user, "ghl")
+    return {"success": True, "details": [out]}
+
+# MONDAY: ingest endpoint
+@router.post("/crm/ingest/monday")
+async def ingest_monday(user: User = Depends(get_current_user)):
+    """Create/Update 'Monday Leads' and pull contacts (board items or users)."""
+    out = await _sync_one_crm(user, "monday")
     return {"success": True, "details": [out]}
 
 @router.post("/crm/sync-to-files")
 async def sync_connected_crms_to_files(
     user: User = Depends(get_current_user),
-    crm: Optional[str] = Query(None, description="Optional: 'hubspot' or 'ghl'"),
+    crm: Optional[str] = Query(None, description="Optional: 'hubspot' or 'ghl' or 'monday'"),
 ):
     """
     For each connected CRM:
       - Ensure a file exists named '<CRM> Leads'
-      - Fetch ALL CONTACTS from that CRM
+      - Fetch ALL CONTACTS
       - Upsert them into the file as Leads (no duplicates on rerun)
     """
     connected = await IntegrationAccount.filter(user_id=user.id, is_active=True).all()
