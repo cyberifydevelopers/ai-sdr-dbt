@@ -80,7 +80,6 @@ import os
 from pathlib import Path
 from controllers.impersonate_controller import impersonate_router
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from controllers.chat_controller import router as chat_router
 # Import the campaigns API router AND the scheduler hook to rehydrate jobs
 from controllers.campaign_controller import (
     router as campaign_router,
@@ -121,7 +120,6 @@ app.include_router(crm_controller.router, prefix="/api", tags=["CRM Controller"]
 app.include_router(admin_controller.admin_router, prefix="/api/admin", tags=["Admin Controller"])
 app.include_router(impersonate_router, prefix="/api", tags=["Admin-Login-AsUser"])
 app.include_router(campaign_router, prefix="/api/campaigns", tags=["campaigns"])
-app.include_router(chat_router,  tags=["HELP"])
 
 
 # ----- Root -----

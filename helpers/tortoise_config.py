@@ -22,7 +22,7 @@ TORTOISE_CONFIG = {
                 "models.campaign",
                 "models.crm",
                 "models.appointment",
-                "models.chat_models"
+               
             ]
         }
     }
