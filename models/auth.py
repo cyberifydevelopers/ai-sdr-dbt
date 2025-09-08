@@ -12,6 +12,8 @@ class User(Model):
     role = fields.CharField(max_length=255, default='user')
     codes = fields.ReverseRelation['Code']
     profile_photo = fields.CharField(max_length=255, null=True) 
+    twilio_account_sid = fields.CharField(max_length=64, null=True)
+    twilio_auth_token = fields.CharField(max_length=64, null=True)
 class Code(Model):
     __tablename__ = 'codes'
 

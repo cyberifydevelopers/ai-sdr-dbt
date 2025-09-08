@@ -35,3 +35,5 @@ extra prompts
 
 
 
+TWILIO_ACCOUNT_SID="ACb42fcb2b2727db8d7fc2b4cdd7fcadec"
+TWILIO_AUTH_TOKEN="ff1a291ab4f16cbadbe1839237305b6e"
