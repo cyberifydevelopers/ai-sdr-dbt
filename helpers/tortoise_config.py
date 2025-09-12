@@ -22,6 +22,7 @@ TORTOISE_CONFIG = {
                 "models.campaign",
                 "models.crm",
                 "models.appointment",
+                "models.form_submission"
                
             ]
         }

@@ -1,3 +1,4 @@
+import uuid
 from tortoise import fields
 from tortoise.models import Model
 from datetime import datetime
@@ -14,6 +15,8 @@ class User(Model):
     profile_photo = fields.CharField(max_length=255, null=True) 
     twilio_account_sid = fields.CharField(max_length=64, null=True)
     twilio_auth_token = fields.CharField(max_length=64, null=True)
+    webhook_token = fields.CharField(max_length=64, unique=True, default=lambda: uuid.uuid4().hex)
+    
 class Code(Model):
     __tablename__ = 'codes'
 

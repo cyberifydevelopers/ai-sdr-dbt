@@ -290,7 +290,7 @@ async def schedule_appointment(data: AppointmentCreate):
     """
     try:
         tzinfo = _tzinfo_from_string(data.timezone)
-
+    
         # Build tz-aware start datetime from provided local date & time
         start_naive = datetime.strptime(f"{data.date} {data.time}", "%Y-%m-%d %H:%M")
         start_at = start_naive.replace(tzinfo=tzinfo)  # assign local tz
