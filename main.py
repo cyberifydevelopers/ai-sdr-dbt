@@ -90,6 +90,7 @@ from scheduler.campaign_scheduler import get_scheduler, reschedule_campaigns_on_
 from controllers.form_controller import router as form_router
 from helpers.intake_worker import start_scheduler, stop_scheduler
 from controllers.intake_admin import router as intake_admin_router
+from controllers.facebook_leads_controller import router as facebook_router
 # ----- Media setup -----
 MEDIA_ROOT = os.getenv("PROFILE_PHOTO_STORAGE", "media/profile_photos")
 media_parent = Path(MEDIA_ROOT).parent
@@ -125,6 +126,7 @@ app.include_router(impersonate_router, prefix="/api", tags=["Admin-Login-AsUser"
 app.include_router(campaign_router, prefix="/api/campaigns", tags=["campaigns"])
 app.include_router(form_router,prefix="/api", tags=["Form details"] )
 app.include_router(intake_admin_router, prefix="/api", tags=["intake-admin"])
+app.include_router(facebook_router, prefix="/api/facebook", tags=["Facebook Routes"])
 # ----- Root -----
 @app.get("/")
 def greetings():
