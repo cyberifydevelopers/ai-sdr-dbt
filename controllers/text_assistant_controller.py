@@ -470,6 +470,46 @@ def _validate_twilio_signature(request: Request, form_data: Dict[str, str]) -> b
 # Real-time progress (polling via SSE)
 # ─────────────────────────────────────────────────────────────────────────────
 
+@router.get("/text/debug/scheduled-selection")
+async def debug_scheduled_selection(
+    include_unowned: bool = Query(default=True),
+    include_past_minutes: int = Query(default=120),
+    horizon_hours: Optional[int] = Query(default=None),
+    user: Annotated[User, Depends(get_current_user)] = None,
+):
+    db_user = await User.get(id=user.id)
+    if include_unowned:
+        appts_all = await Appointment.filter(status=AppointmentStatus.SCHEDULED).filter(
+            Q(user=db_user) | Q(user_id=None)
+        ).all()
+    else:
+        appts_all = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED).all()
+    eligible = [
+        a for a in appts_all
+        if _in_scheduled_window(a, horizon_hours=horizon_hours, include_past_minutes=include_past_minutes)
+    ]
+    samples = []
+    for a in appts_all[:10]:
+        now = _now_like(a)
+        start_at = _ensure_aware(a.start_at, getattr(a, "timezone", None))
+        samples.append({
+            "id": str(a.id),
+            "phone": a.phone,
+            "tz": getattr(a, "timezone", None),
+            "start_at": start_at,
+            "now": now,
+            "eligible": a in eligible,
+        })
+    info = {
+        "total": len(appts_all),
+        "eligible": len(eligible),
+        "include_unowned": include_unowned,
+        "include_past_minutes": include_past_minutes,
+        "horizon_hours": horizon_hours if horizon_hours is not None else os.getenv("SCHEDULED_HORIZON_HOURS", "48"),
+    }
+    logger.info(f"[debug] scheduled_selection: {info}")
+    return {"info": info, "samples": samples}
+
 @router.get("/text/message-progress")
 async def get_message_progress(
     job_id: Optional[str] = None,
@@ -1300,10 +1340,12 @@ async def _send_scheduled_for_user(user_id: int, request: Optional[Request] = No
     db_user = await User.get(id=user_id)
     assistant = await _pick_assistant_for_flow(db_user, "scheduled")
     if not assistant:
+        logger.info(f"[sched] no assistant for user_id={user_id}")
         return
     from_row = await PurchasedNumber.filter(user=db_user, attached_assistant=assistant.id).first() \
                or await PurchasedNumber.filter(user=db_user).first()
     if not from_row:
+        logger.info(f"[sched] no from_number for user_id={user_id}")
         return
     include_unowned = _env_bool("SCHEDULED_INCLUDE_UNOWNED", False)
     include_past_min = 0
@@ -1318,7 +1360,17 @@ async def _send_scheduled_for_user(user_id: int, request: Optional[Request] = No
     else:
         appts_all = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED).all()
     appts = [a for a in appts_all if _in_scheduled_window(a, include_past_minutes=include_past_min)]
+    logger.info(
+        f"[sched] user_id={user_id} total_all={len(appts_all)} eligible={len(appts)} include_unowned={include_unowned} include_past_min={include_past_min}"
+    )
     if not appts:
+        # Log up to 5 examples with reasons
+        for a in appts_all[:5]:
+            now = _now_like(a)
+            start_at = _ensure_aware(a.start_at, getattr(a, "timezone", None))
+            logger.info(
+                f"[sched] example_excluded user_id={user_id} start_at={start_at} now={now} tz={getattr(a,'timezone',None)}"
+            )
         return
     class _DummyReq:
         base_url = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
