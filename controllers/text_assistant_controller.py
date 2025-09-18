@@ -9,6 +9,7 @@ from typing import Annotated, List, Optional, Tuple, Dict, Any, AsyncGenerator
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, Form, Query
+import logging
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -68,6 +69,9 @@ class MessageScheduledRequest(BaseModel):
     horizon_hours: Optional[int] = Field(default=None, description="Override horizon hours; 0 disables window filter")
     include_past_minutes: Optional[int] = Field(default=0, ge=0, le=1440)
     include_unowned: Optional[bool] = Field(default=True, description="Include appointments with null user_id as fallback")
+    # Dedupe/backoff controls
+    allow_repeat_to_same_number: Optional[bool] = Field(default=True, description="Allow sending again to same number even if a prior success exists")
+    unscheduled_backoff_hours: Optional[int] = Field(default=None, description="Override UNSCHEDULED_BACKOFF_HOURS for unscheduled flow")
 
 class AttachAssistantRequest(BaseModel):
     phone_number: str
@@ -80,6 +84,13 @@ class AttachAssistantRequest(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 router = APIRouter()
+logger = logging.getLogger("text_assistant")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 # ---- SSE token helpers -------------------------------------------------------
 
 def _make_sse_token(user_id: int, job_id: str, ttl_seconds: int = 600) -> str:
@@ -169,6 +180,12 @@ def _sanitize_phone(number: str) -> str:
     accidental E.164 mis-formatting across locales.
     """
     return (number or "").strip()
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
 
 async def _prefer_assistant_for_appt(user_id: int, appt: Appointment, default_assistant: Optional[Assistant]) -> Optional[Assistant]:
     """Use per-appointment assistant if your model has assistant_id; otherwise default."""
@@ -516,6 +533,7 @@ async def stream_message_progress_sse(
     except Exception:
         auth_user = None
     if not auth_user:
+        logger.warning(f"[sse] auth failed for job_id={job_id}")
         raise HTTPException(status_code=403, detail="Not authenticated")
     async def event_stream() -> AsyncGenerator[bytes, None]:
         """
@@ -528,6 +546,7 @@ async def stream_message_progress_sse(
                 break
             job = await MessageJob.get_or_none(id=job_id, user=auth_user)
             if not job:
+                logger.info(f"[sse] job not found job_id={job_id}")
                 yield b"event: done\ndata: {\"error\":\"not_found\"}\n\n"
                 break
             payload = {
@@ -542,9 +561,11 @@ async def stream_message_progress_sse(
             }
             if payload != last:
                 # emit valid JSON
+                logger.info(f"[sse] prog job_id={job_id} sent={payload['sent']} failed={payload['failed']} status={payload['status']}")
                 yield f"data: {json.dumps(payload, default=str)}\n\n".encode("utf-8")
                 last = payload
             if job.status in ("completed", "failed", "canceled"):
+                logger.info(f"[sse] done job_id={job_id} status={job.status}")
                 yield b"event: done\ndata: {}\n\n"
                 break
             await asyncio.sleep(1.0)
@@ -845,6 +866,7 @@ async def send_text_message(
 
         status_cb = _build_status_callback_url(request, payload.status_webhook)
 
+        logger.info(f"[send] to={_sanitize_phone(payload.to_number)} from={_sanitize_phone(from_row.phone_number)}")
         msg = await _twilio_send_message(
             client=client,
             body=(payload.body or "")[:1000],
@@ -879,11 +901,13 @@ async def send_text_message(
             "code": getattr(e, "code", None),
             "more_info": getattr(e, "more_info", None),
         }
+        logger.error(f"[send] twilio_error to={_sanitize_phone(payload.to_number)} code={detail['code']} status={detail['status']} msg={detail['message']}")
         raise HTTPException(status_code=400, detail={"twilio_error": detail})
     except HTTPException:
         # Preserve explicit HTTPException (e.g., bad from_number, no purchased number)
         raise
     except Exception as e:
+        logger.exception(f"[send] unexpected_error to={_sanitize_phone(payload.to_number)}: {e}")
         raise HTTPException(status_code=400, detail=f"Error sending message: {str(e)}")
 
 @router.post("/text/sms-status")
@@ -936,6 +960,7 @@ async def twilio_sms_webhook(
         user = await User.get(id=to_row.user_id)
         client, _, _ = _twilio_client_for_user_sync(user)
 
+        logger.info(f"[inbound] to={_sanitize_phone(To)} from={_sanitize_phone(From)}")
         # Log inbound first
         await _store_record_inbound(
             user=user,
@@ -979,6 +1004,7 @@ async def twilio_sms_webhook(
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception(f"[inbound] error to={_sanitize_phone(To)} from={_sanitize_phone(From)}: {e}")
         return {"success": False, "error": str(e)}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1022,10 +1048,11 @@ async def _bulk_message_appointments_core(
     status_cb = _build_status_callback_url(request)
 
     for appt in appointments:
-        # Skip if already sent successfully for this appointment
-        already = await MessageRecord.filter(appointment=appt, success=True).exists()
-        if already:
-            continue
+        # Dedupe by appointment unless explicitly allowed to repeat
+        if not (getattr(request, "allow_repeat_to_same_number", False)):
+            already = await MessageRecord.filter(appointment=appt, success=True).exists()
+            if already:
+                continue
 
         a = await _prefer_assistant_for_appt(db_user.id, appt, assistant)
 
@@ -1049,6 +1076,7 @@ async def _bulk_message_appointments_core(
             attempts_remaining = 1 + max(0, retry_count)
             while attempts_remaining > 0:
                 try:
+                    logger.info(f"[bulk] send attempt job_id={job.id} to={_sanitize_phone(appt.phone)} msg_ix={msg_index} remaining={attempts_remaining}")
                     msg = await _twilio_send_message(
                         client=client,
                         body=attempt_body,
@@ -1063,6 +1091,7 @@ async def _bulk_message_appointments_core(
                     job.sent += 1
                     break
                 except Exception as e:
+                    logger.error(f"[bulk] send failed job_id={job.id} to={_sanitize_phone(appt.phone)} err={e}")
                     await _store_record_outbound(
                         job=job, user=db_user, assistant=a or assistant, appointment=appt,
                         to_number=appt.phone, from_number=from_row.phone_number, body=attempt_body, sid=None, success=False, error=str(e)
@@ -1070,9 +1099,11 @@ async def _bulk_message_appointments_core(
                     job.failed += 1
                     attempts_remaining -= 1
                     if attempts_remaining > 0:
+                        logger.info(f"[bulk] retrying in {retry_delay_seconds}s job_id={job.id} to={_sanitize_phone(appt.phone)}")
                         await asyncio.sleep(max(0, retry_delay_seconds))
             # optional delay between multiple messages to same recipient
             if per_message_delay_seconds and msg_index < max(1, messages_per_recipient) - 1:
+                logger.info(f"[bulk] pause between messages {per_message_delay_seconds}s job_id={job.id} to={_sanitize_phone(appt.phone)}")
                 await asyncio.sleep(max(0, per_message_delay_seconds))
 
     job.status = "completed"
@@ -1203,14 +1234,19 @@ async def message_unscheduled_appointments(
         appts_all = await Appointment.filter(user=db_user).exclude(status=AppointmentStatus.SCHEDULED)
         # dedup + optional backoff per phone
         try:
-            backoff_h = int(os.getenv("UNSCHEDULED_BACKOFF_HOURS", "0"))
+            backoff_h = (
+                payload.unscheduled_backoff_hours
+                if payload.unscheduled_backoff_hours is not None
+                else int(os.getenv("UNSCHEDULED_BACKOFF_HOURS", "0"))
+            )
         except Exception:
             backoff_h = 0
 
         filtered: List[Appointment] = []
         for a in appts_all:
-            if await MessageRecord.filter(appointment=a, success=True).exists():
-                continue
+            if not (payload.allow_repeat_to_same_number or False):
+                if await MessageRecord.filter(appointment=a, success=True).exists():
+                    continue
             if backoff_h > 0 and not await _unscheduled_backoff_ok_async(a.phone, db_user, backoff_h):
                 continue
             filtered.append(a)
@@ -1269,12 +1305,25 @@ async def _send_scheduled_for_user(user_id: int, request: Optional[Request] = No
                or await PurchasedNumber.filter(user=db_user).first()
     if not from_row:
         return
-    appts_all = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED).all()
-    appts = [a for a in appts_all if _in_scheduled_window(a)]
+    include_unowned = _env_bool("SCHEDULED_INCLUDE_UNOWNED", False)
+    include_past_min = 0
+    try:
+        include_past_min = int(os.getenv("SCHEDULED_INCLUDE_PAST_MINUTES", "0"))
+    except Exception:
+        include_past_min = 0
+    if include_unowned:
+        appts_all = await Appointment.filter(status=AppointmentStatus.SCHEDULED).filter(
+            Q(user=db_user) | Q(user_id=None)
+        ).all()
+    else:
+        appts_all = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED).all()
+    appts = [a for a in appts_all if _in_scheduled_window(a, include_past_minutes=include_past_min)]
     if not appts:
         return
     class _DummyReq:
         base_url = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
+    # Allow scheduler to control dedupe via env
+    setattr(_DummyReq, "allow_repeat_to_same_number", _env_bool("ALLOW_REPEAT_TO_SAME_NUMBER", True))
     dummy_req = request or _DummyReq()
     await _bulk_message_appointments_core(
         db_user=db_user, request=dummy_req, assistant=assistant, from_row=from_row, appointments=appts
@@ -1309,6 +1358,7 @@ async def run_unscheduled_texting_job():
                 class _DummyReq:
                     base_url = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
                 dummy_req = _DummyReq()
+                setattr(dummy_req, "allow_repeat_to_same_number", _env_bool("ALLOW_REPEAT_TO_SAME_NUMBER", True))
                 appts_all = await Appointment.filter(user=db_user).exclude(status=AppointmentStatus.SCHEDULED)
                 try:
                     backoff_h = int(os.getenv("UNSCHEDULED_BACKOFF_HOURS", "0"))
@@ -1316,8 +1366,9 @@ async def run_unscheduled_texting_job():
                     backoff_h = 0
                 filtered: List[Appointment] = []
                 async for a in appts_all:  # in case QuerySet is async-iterable
-                    if await MessageRecord.filter(appointment=a, success=True).exists():
-                        continue
+                    if not _env_bool("ALLOW_REPEAT_TO_SAME_NUMBER", True):
+                        if await MessageRecord.filter(appointment=a, success=True).exists():
+                            continue
                     if backoff_h > 0 and not await _unscheduled_backoff_ok_async(a.phone, db_user, backoff_h):
                         continue
                     filtered.append(a)

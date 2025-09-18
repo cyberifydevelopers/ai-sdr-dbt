@@ -60,6 +60,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 from fastapi import FastAPI
+import asyncio
 from controllers import (
     assistant_controller,
     call_controller,
@@ -183,3 +184,16 @@ async def _startup():
 @app.on_event("shutdown")
 async def _shutdown():
     shutdown_scheduler(wait=False)  
+
+
+# Kickoff texting jobs immediately on startup (in addition to scheduled cron)
+@app.on_event("startup")
+async def _kickoff_text_jobs():
+    try:
+        from controllers.text_assistant_controller import run_texting_job, run_unscheduled_texting_job
+        # Fire-and-forget kickoff to avoid blocking startup
+        asyncio.create_task(run_texting_job())
+        asyncio.create_task(run_unscheduled_texting_job())
+        print("[text scheduler] kickoff: triggered scheduled & unscheduled texting jobs")
+    except Exception as e:
+        print("[text scheduler] kickoff error:", e)
