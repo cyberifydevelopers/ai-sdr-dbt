@@ -1,6 +1,7 @@
 # sms_controller.py
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import asyncio
 import json
 import os
@@ -63,6 +64,10 @@ class MessageScheduledRequest(BaseModel):
     retry_count: Optional[int] = Field(default=0, ge=0, le=5)
     retry_delay_seconds: Optional[int] = Field(default=60, ge=5, le=3600)
     per_message_delay_seconds: Optional[int] = Field(default=0, ge=0, le=3600)
+    # Scheduled window filtering
+    horizon_hours: Optional[int] = Field(default=None, description="Override horizon hours; 0 disables window filter")
+    include_past_minutes: Optional[int] = Field(default=0, ge=0, le=1440)
+    include_unowned: Optional[bool] = Field(default=True, description="Include appointments with null user_id as fallback")
 
 class AttachAssistantRequest(BaseModel):
     phone_number: str
@@ -328,22 +333,44 @@ async def _store_record_inbound(
 
 # ---- Appointment timing/window knobs ----------------------------------------
 
-def _now_like(appt_dt: datetime) -> datetime:
-    """Return 'now' aligned with the appointment tz (appt_dt is tz-aware)."""
-    tz = appt_dt.tzinfo or timezone.utc
-    return datetime.now(tz=tz)
+def _ensure_aware(dt: datetime, tz_str: Optional[str]) -> datetime:
+    """Ensure datetime is timezone-aware using provided tz string or UTC."""
+    if dt.tzinfo:
+        return dt
+    try:
+        if tz_str:
+            return dt.replace(tzinfo=ZoneInfo(tz_str))
+    except Exception:
+        pass
+    return dt.replace(tzinfo=timezone.utc)
 
-def _in_scheduled_window(appt: Appointment) -> bool:
+def _now_like(appt: Appointment) -> datetime:
+    """Return 'now' aligned with the appointment tz."""
+    tz_name = getattr(appt, "timezone", None)
+    try:
+        if tz_name:
+            return datetime.now(tz=ZoneInfo(tz_name))
+    except Exception:
+        pass
+    return datetime.now(tz=timezone.utc)
+
+def _in_scheduled_window(appt: Appointment, *, horizon_hours: Optional[int] = None, include_past_minutes: int = 0) -> bool:
     """
     Only push reminders for near-future SCHEDULED appointments.
-    Default: within next 48h. Configure via SCHEDULED_HORIZON_HOURS.
+    Default: within next 48h (configurable via SCHEDULED_HORIZON_HOURS). If horizon_hours == 0, no upper bound.
+    include_past_minutes allows slight grace period for recently missed times.
     """
-    try:
-        horizon_h = int(os.getenv("SCHEDULED_HORIZON_HOURS", "48"))
-    except Exception:
-        horizon_h = 48
-    now = _now_like(appt.start_at)
-    return now <= appt.start_at <= now + timedelta(hours=horizon_h)
+    if horizon_hours is None:
+        try:
+            horizon_hours = int(os.getenv("SCHEDULED_HORIZON_HOURS", "48"))
+        except Exception:
+            horizon_hours = 48
+    now = _now_like(appt)
+    start_at = _ensure_aware(appt.start_at, getattr(appt, "timezone", None))
+    lower = now - timedelta(minutes=max(0, include_past_minutes))
+    if horizon_hours == 0:
+        return start_at >= lower
+    return lower <= start_at <= now + timedelta(hours=max(0, horizon_hours))
 
 async def _unscheduled_backoff_ok_async(phone: str, user: User, since_hours: Optional[int] = None) -> bool:
     """
@@ -1088,13 +1115,33 @@ async def message_scheduled_appointments(
         from_row = await _resolve_from_number(db_user, assistant, payload.from_number)
 
         # pull appointments and restrict to upcoming window
-        appts_all = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED)
-        appts = [a for a in appts_all if _in_scheduled_window(a)]
+        # Optionally include unowned (user_id is null) to handle legacy data
+        if payload.include_unowned:
+            appts_all = await Appointment.filter(status=AppointmentStatus.SCHEDULED).filter(
+                Q(user=db_user) | Q(user_id=None)
+            )
+        else:
+            appts_all = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED)
+        appts = [a for a in appts_all if _in_scheduled_window(a, horizon_hours=payload.horizon_hours, include_past_minutes=payload.include_past_minutes or 0)]
         if payload.limit and payload.limit > 0:
             appts = appts[: payload.limit]
 
         if not appts:
-            return {"success": True, "sent": 0, "results": []}
+            total_all = await Appointment.filter(status=AppointmentStatus.SCHEDULED).count()
+            total_user = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED).count()
+            return {
+                "success": True,
+                "sent": 0,
+                "results": [],
+                "detail": "No appointments matched filters",
+                "stats": {
+                    "total_scheduled_all": total_all,
+                    "total_scheduled_for_user": total_user,
+                    "include_unowned": bool(payload.include_unowned),
+                    "horizon_hours": payload.horizon_hours if payload.horizon_hours is not None else os.getenv("SCHEDULED_HORIZON_HOURS", "48"),
+                    "include_past_minutes": payload.include_past_minutes or 0,
+                }
+            }
 
         if payload.background is False:
             job_id = await _bulk_message_appointments_core(
