@@ -23,7 +23,8 @@ TORTOISE_CONFIG = {
                 "models.crm",
                 "models.appointment",
                 "models.form_submission",
-                "models.facebook"  
+                "models.facebook",
+                "models.message",
             ]
         }
     }

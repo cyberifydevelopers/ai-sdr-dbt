@@ -91,6 +91,8 @@ from controllers.form_controller import router as form_router
 from helpers.intake_worker import start_scheduler, stop_scheduler
 from controllers.intake_admin import router as intake_admin_router
 from controllers.facebook_leads_controller import router as facebook_router
+from controllers.text_assistant_controller import router as text_assistant_router
+from controllers.text_assistant_controller import schedule_texting_job
 # ----- Media setup -----
 MEDIA_ROOT = os.getenv("PROFILE_PHOTO_STORAGE", "media/profile_photos")
 media_parent = Path(MEDIA_ROOT).parent
@@ -127,6 +129,8 @@ app.include_router(campaign_router, prefix="/api/campaigns", tags=["campaigns"])
 app.include_router(form_router,prefix="/api", tags=["Form details"] )
 app.include_router(intake_admin_router, prefix="/api", tags=["intake-admin"])
 app.include_router(facebook_router, prefix="/api/facebook", tags=["Facebook Routes"])
+app.include_router(text_assistant_router, prefix="/api", tags=["Text Assistant Controller"])
+
 # ----- Root -----
 @app.get("/")
 def greetings():
@@ -169,6 +173,12 @@ async def _startup():
     get_scheduler()
     # reattach cron jobs for RUNNING/SCHEDULED campaigns
     await reschedule_campaigns_on_startup()
+    # schedule always-running texting job
+    try:
+        tz = os.getenv("APS_TIMEZONE", "UTC")
+        schedule_texting_job(tz)
+    except Exception as e:
+        print("[text scheduler] failed to schedule texting job:", e)
 
 @app.on_event("shutdown")
 async def _shutdown():
