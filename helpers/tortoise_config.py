@@ -25,6 +25,7 @@ TORTOISE_CONFIG = {
                 "models.form_submission",
                 "models.facebook",
                 "models.message",
+                "models.call_blocklist",
             ]
         }
     }
