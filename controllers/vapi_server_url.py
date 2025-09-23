@@ -1,13 +1,67 @@
 # controllers/vapi_server_url.py
 from fastapi import APIRouter, Request, Response
+from json import JSONDecodeError
+import json
+import logging
+
 from helpers.spam_guard import screen_number
 from helpers.vapi_helper import get_headers  # already in your repo
+
 router = APIRouter()
+log = logging.getLogger("vapi_webhook")
+
+async def parse_incoming_body(req: Request) -> dict:
+    """
+    Safely parse JSON/form bodies. Returns {} on empty/invalid payloads.
+    Never throws JSONDecodeError.
+    """
+    ctype = (req.headers.get("content-type") or "").lower()
+
+    # Try JSON first if announced
+    if "application/json" in ctype:
+        try:
+            return await req.json()
+        except (JSONDecodeError, ValueError) as e:
+            log.warning("Invalid JSON body: %s", e)
+
+    # Try form payloads (some providers send x-www-form-urlencoded)
+    if "application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype:
+        try:
+            form = await req.form()
+            # If the provider wraps json in a field like `payload`, decode it
+            if "payload" in form:
+                try:
+                    return json.loads(form["payload"])
+                except (JSONDecodeError, TypeError) as e:
+                    log.warning("Invalid JSON in form payload: %s", e)
+                    return dict(form)
+            return dict(form)
+        except Exception as e:
+            log.warning("Form parse failed: %s", e)
+
+    # Fallback: raw body (sometimes no/incorrect content-type is sent)
+    try:
+        raw = await req.body()
+        if not raw:
+            return {}
+        return json.loads(raw.decode("utf-8"))
+    except (JSONDecodeError, UnicodeDecodeError) as e:
+        log.warning("Raw body not JSON: %s", e)
+        return {}
+    except Exception as e:
+        log.exception("Unexpected error reading body: %s", e)
+        return {}
 
 @router.post("/webhooks/vapi")
 async def vapi_server_url(req: Request):
-    body = await req.json()
+    body = await parse_incoming_body(req)
+
+    # If body is empty or not the expected shape, gracefully ignore
     msg = (body or {}).get("message", {})
+    if not msg:
+        # Many providers send health checks / empty retries
+        return Response(status_code=204)
+
     if msg.get("type") != "assistant-request":
         return Response(status_code=204)
 
@@ -43,5 +97,4 @@ async def vapi_server_url(req: Request):
         }
 
     # action == "allow": proceed with your normal assistant
-    # Option A: inline config; Option B: return a saved assistantId
     return {"assistantId": "<YOUR_DEFAULT_ASSISTANT_ID>"}
