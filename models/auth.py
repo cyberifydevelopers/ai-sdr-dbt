@@ -16,6 +16,13 @@ class User(Model):
     twilio_account_sid = fields.CharField(max_length=64, null=True)
     twilio_auth_token = fields.CharField(max_length=64, null=True)
     webhook_token = fields.CharField(max_length=64, unique=True, default=lambda: uuid.uuid4().hex)
+    balance_cents = fields.IntField(default=0)              
+    bonus_cents = fields.IntField(default=0)                  
+    currency = fields.CharField(max_length=8, default="USD")
+    stripe_customer_id = fields.CharField(max_length=64, null=True)
+    per_minute_cents = fields.IntField(default=10)       
+
+    transactions = fields.ReverseRelation['AccountTransaction']
     
 class Code(Model):
     __tablename__ = 'codes'

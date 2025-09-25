@@ -216,6 +216,7 @@ from controllers.form_controller import router as form_router
 from helpers.intake_worker import start_scheduler, stop_scheduler
 from controllers.intake_admin import router as intake_admin_router
 from controllers.facebook_leads_controller import router as facebook_router
+from controllers.stripe_controller import router as stripe_controller
 
 # >>> Text Assistant API + scheduler nudge <<<
 from controllers.text_assistant_controller import (
@@ -263,6 +264,7 @@ app.include_router(intake_admin_router, prefix="/api", tags=["intake-admin"])
 app.include_router(facebook_router, prefix="/api/facebook", tags=["Facebook Routes"])
 app.include_router(text_assistant_router, prefix="/api", tags=["Text Assistant Controller"])
 app.include_router(vapi_server_url, prefix="/api")
+app.include_router(stripe_controller , prefix="/api" , tags={"Stripe Controller"})
 
 # ----- Root -----
 @app.get("/")

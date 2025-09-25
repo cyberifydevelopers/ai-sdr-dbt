@@ -1,34 +1,20 @@
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# # controllers/call_controller.py
 # import asyncio
-# from datetime import date, datetime
+# from datetime import date, datetime, timedelta
 # from typing import Annotated, List, Optional
 
 # import httpx
 # from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
 # from tortoise.expressions import Q
+# from tortoise.functions import Avg, Count
 
 # from helpers.token_helper import get_current_user
 # from helpers.vapi_helper import get_headers, generate_token
 # from models.auth import User
 # from models.call_log import CallLog
 # from models.assistant import Assistant
+# from models.call_blocklist import CallBlocklist  # <-- required for auto-flag
 
 # router = APIRouter()
 
@@ -40,6 +26,50 @@
 #         return datetime.fromisoformat(s.replace("Z", "+00:00"))
 #     except Exception:
 #         return None
+
+
+# async def _auto_flag_spam(customer_number: Optional[str]) -> None:
+#     """
+#     Post-call heuristic:
+#       - If caller makes >= 8 calls 'today' and the average duration < 8 seconds,
+#         put them on a 24h temporary blocklist.
+#     """
+#     if not customer_number:
+#         return
+
+#     now = datetime.utcnow()
+#     start_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+#     end_day = start_day + timedelta(days=1)
+
+#     # Aggregate today's stats for this number
+#     stats = await CallLog.filter(
+#         customer_number=customer_number,
+#         call_started_at__gte=start_day,
+#         call_started_at__lt=end_day,
+#     ).annotate(
+#         c=Count("id"),
+#         avgdur=Avg("call_duration"),
+#     ).values("c", "avgdur")
+
+#     if not stats:
+#         return
+
+#     c = int(stats[0].get("c") or 0)
+#     avgdur = float(stats[0].get("avgdur") or 0.0)
+
+#     # Heuristic threshold
+#     if c >= 8 and avgdur < 8.0:
+#         until = now + timedelta(hours=24)
+#         existing = await CallBlocklist.get_or_none(phone_number=customer_number)
+#         await CallBlocklist.update_or_create(
+#             defaults={
+#                 "reason": f"Auto-spam: {c} calls today with avg {avgdur:.2f}s",
+#                 "blocked_until": until,
+#                 "hit_count": (existing.hit_count + 1) if existing else 1,
+#             },
+#             phone_number=customer_number,
+#         )
+
 
 # # ------------------ Endpoints ------------------
 
@@ -355,6 +385,16 @@
 #             transcript_quality = "complete" if words >= min_words and sents >= min_sents else "partial"
 
 #         call = await CallLog.get_or_none(call_id=call_id)
+
+#         # Extract number from payload or fallback to saved call
+#         customer_number = None
+#         try:
+#             customer_number = (call_data.get("customer") or {}).get("number")
+#         except Exception:
+#             customer_number = None
+#         if not customer_number and call:
+#             customer_number = call.customer_number
+
 #         if call:
 #             call.is_transferred = False
 #             call.call_ended_reason = call_data.get("endedReason", "Unknown")
@@ -374,7 +414,13 @@
 #                 call_ended_at=end_dt,
 #                 call_duration=duration,
 #                 criteria_satisfied=False,
+#                 customer_number=customer_number,
 #             )
+
+#         # --- Post-call auto-flag heuristic (spam) ---
+#         # (1) Very short call note: heuristic works via daily stats; nothing to do here beyond saving duration
+#         # (2) If many calls today and average duration is tiny -> temporary block
+#         await _auto_flag_spam(customer_number)
 
 #         # Optional: trigger downstream appointment extraction (internal service)
 #         try:
@@ -382,34 +428,46 @@
 #                 await client.post(
 #                     # IMPORTANT: your live base must be reachable publicly if you expect this to be called externally.
 #                     # This internal self-call is fine on the same machine.
-#                     f"http://localhost:8000/api/appointments/from-call/{call_id}",
+#                     f"https://aisdr-dbt.ddns.net/api/appointments/from-call/{call_id}",
 #                     headers={"Authorization": f"Bearer {generate_token()}"},
 #                 )
 #         except Exception as _e:
 #             print("appointment extract failed:", _e)
 #     except Exception as e:
 #         print(f"Error in get_call_details: {e}")
+        
+        
+        
+        
+        
+        
 # controllers/call_controller.py
+
 import asyncio
 from datetime import date, datetime, timedelta
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from tortoise.expressions import Q
 from tortoise.functions import Avg, Count
 
 from helpers.token_helper import get_current_user
 from helpers.vapi_helper import get_headers, generate_token
+from helpers.billing_helper import (
+    per_minute_cost_cents,
+    compute_call_charge_cents,
+    apply_transaction,
+)
 from models.auth import User
 from models.call_log import CallLog
 from models.assistant import Assistant
-from models.call_blocklist import CallBlocklist  # <-- required for auto-flag
+from models.call_blocklist import CallBlocklist  # auto-flag
 
 router = APIRouter()
 
-# ------------------ Utility ------------------
+# ------------------ Utilities ------------------
+
 def _iso_to_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
@@ -432,7 +490,6 @@ async def _auto_flag_spam(customer_number: Optional[str]) -> None:
     start_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end_day = start_day + timedelta(days=1)
 
-    # Aggregate today's stats for this number
     stats = await CallLog.filter(
         customer_number=customer_number,
         call_started_at__gte=start_day,
@@ -448,7 +505,6 @@ async def _auto_flag_spam(customer_number: Optional[str]) -> None:
     c = int(stats[0].get("c") or 0)
     avgdur = float(stats[0].get("avgdur") or 0.0)
 
-    # Heuristic threshold
     if c >= 8 and avgdur < 8.0:
         until = now + timedelta(hours=24)
         existing = await CallBlocklist.get_or_none(phone_number=customer_number)
@@ -462,11 +518,71 @@ async def _auto_flag_spam(customer_number: Optional[str]) -> None:
         )
 
 
+async def _bill_call_if_needed(
+    *,
+    call_id: str,
+    user_id: Optional[int],
+    duration_seconds: Optional[float],
+    currency_hint: Optional[str] = None,
+) -> Tuple[bool, Optional[int], Optional[str]]:
+    """
+    Idempotently debit the user's wallet for a finished call.
+
+    Returns:
+      (debited, charge_cents, error_msg_if_any)
+    """
+    try:
+        if not user_id or not duration_seconds or duration_seconds <= 0:
+            return (False, None, None)
+
+        # Idempotency key reusing the existing column used for Stripe PI
+        idempotency_key = f"call_{call_id}"
+
+        from models.billing import AccountTransaction  # local import to avoid cycles
+        already = await AccountTransaction.filter(
+            stripe_payment_intent_id=idempotency_key
+        ).exists()
+        if already:
+            return (False, None, None)  # already charged
+
+        user = await User.get_or_none(id=user_id)
+        if not user:
+            return (False, None, "user_not_found")
+
+        rate = per_minute_cost_cents(user)  # e.g., 10¢/min default
+        charge_cents = compute_call_charge_cents(
+            duration_seconds=int(duration_seconds),
+            rate_per_min_cents=rate,
+            round_mode="ceil",
+        )
+        if charge_cents <= 0:
+            return (False, 0, None)
+
+        # Attempt debit
+        try:
+            await apply_transaction(
+                user_id=user.id,
+                amount_cents=-charge_cents,
+                kind="debit_call",
+                description=f"Call charge (call_id={call_id})",
+                currency=(user.currency or "USD").upper(),
+                stripe_pi=idempotency_key,  # store our call id here for idempotency
+                metadata={"call_id": call_id, "computed_rate_cents": rate},
+            )
+            return (True, charge_cents, None)
+        except ValueError as ve:
+            # Likely "Insufficient balance" -> skip but report gracefully
+            return (False, charge_cents, str(ve))
+    except Exception as e:
+        return (False, None, f"internal_error: {e!s}")
+
+
 # ------------------ Endpoints ------------------
 
 # All call logs (admin-ish)
 @router.get("/all_call_logs")
 async def get_logs(user: Annotated[User, Depends(get_current_user)]):
+    # (Optional: gate by admin role if needed)
     return await CallLog.all()
 
 # User-specific call logs (short info)
@@ -520,7 +636,7 @@ async def get_user_call_cost(user: Annotated[User, Depends(get_current_user)]):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"An error occurred: {str(e)}")
 
-# Fetch a call directly from Vapi and return important fields
+# Fetch a call directly from Vapi and return important fields (+ billing preview)
 @router.get("/call/{call_id}")
 async def get_call(call_id: str, user: Annotated[User, Depends(get_current_user)]):
     try:
@@ -535,7 +651,16 @@ async def get_call(call_id: str, user: Annotated[User, Depends(get_current_user)
         ended_at = call_data.get("endedAt")
         start_dt = _iso_to_dt(started_at)
         end_dt = _iso_to_dt(ended_at)
-        call_duration = (end_dt - start_dt).total_seconds() if start_dt and end_dt else None
+        duration = (end_dt - start_dt).total_seconds() if start_dt and end_dt else None
+
+        # Billing preview for the authenticated user
+        rate = per_minute_cost_cents(user)
+        est_cents = compute_call_charge_cents(
+            duration_seconds=int(duration or 0),
+            rate_per_min_cents=rate,
+            round_mode="ceil",
+        ) if duration else 0
+        rounded_minutes = int(((duration or 0) + 59) // 60) if duration else 0
 
         important = {
             "recording_url": call_data.get("artifact", {}).get("recordingUrl", "N/A"),
@@ -547,7 +672,7 @@ async def get_call(call_id: str, user: Annotated[User, Depends(get_current_user)
             "cost": call_data.get("cost", 0),
             "created_at": call_data.get("createdAt", "Unknown"),
             "updated_at": call_data.get("updatedAt", "Unknown"),
-            "call_duration": call_duration,
+            "call_duration": duration,
             "assistant": {
                 "id": call_data.get("assistantId", "Unknown"),
                 "name": call_data.get("assistant", {}).get("name", "Unknown assistant"),
@@ -561,6 +686,14 @@ async def get_call(call_id: str, user: Annotated[User, Depends(get_current_user)
                 "custom_field_02": call_data.get("assistantOverrides", {}).get("variableValues", {}).get("custom_field_02", "Unknown"),
             },
             "summary": call_data.get("analysis", {}).get("summary", "N/A"),
+
+            # Billing preview
+            "billing": {
+                "rate_cents_per_min": rate,
+                "estimated_cents": est_cents,
+                "rounded_minutes": rounded_minutes,
+                "policy": "per-started-minute (ceil)",
+            },
         }
         return important
     except Exception as e:
@@ -583,15 +716,20 @@ async def delete_calls(id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting call logs: {str(e)}")
 
-# Backfill missing details by polling Vapi
+# Backfill missing details by polling Vapi (also applies billing idempotently)
 @router.get("/update_calls")
 async def update_call_logs_for_missing_details():
     try:
-        calls_to_update = await CallLog.filter(Q(call_ended_reason__isnull=True) | Q(call_duration__isnull=True)).all()
+        calls_to_update = await CallLog.filter(
+            Q(call_ended_reason__isnull=True) | Q(call_duration__isnull=True)
+        ).all()
         if not calls_to_update:
             return {"message": "No calls need to be updated."}
 
         updated = 0
+        billed = 0
+        insufficient = 0
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             for call in calls_to_update:
                 url = f"https://api.vapi.ai/call/{call.call_id}"
@@ -614,11 +752,35 @@ async def update_call_logs_for_missing_details():
                 await call.save()
                 updated += 1
 
-        return {"message": f"Successfully updated {updated} calls"}
+                # Try billing (idempotent)
+                uid = None
+                try:
+                    uid = call.user_id  # FK id available in Tortoise
+                except Exception:
+                    try:
+                        await call.fetch_related("user")
+                        uid = call.user.id if call.user else None
+                    except Exception:
+                        uid = None
+
+                debited, cents, err = await _bill_call_if_needed(
+                    call_id=call.call_id, user_id=uid, duration_seconds=duration
+                )
+                if debited:
+                    billed += 1
+                elif err and "Insufficient balance" in err:
+                    insufficient += 1
+
+        return {
+            "message": f"Updated {updated} calls",
+            "billed_calls": billed,
+            "insufficient_balance_calls": insufficient,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# Sync inbound calls directly from Vapi (for assistants that missed webhook)
+# Sync inbound calls from Vapi (for assistants that missed webhook).
+# We schedule a background poll that will also do the billing.
 @router.post("/sync-inbound-calls")
 async def sync_inbound_calls(user: Annotated[User, Depends(get_current_user)], background_tasks: BackgroundTasks):
     try:
@@ -666,7 +828,7 @@ async def sync_inbound_calls(user: Annotated[User, Depends(get_current_user)], b
                         lead_id=None,
                     )
 
-                    # kick a background poll to finalize details
+                    # Schedule background poll -> will also apply debit idempotently
                     background_tasks.add_task(get_call_details, call_id=call_id, delay=300, user_id=user.id)
                     synced_count += 1
 
@@ -704,7 +866,7 @@ async def get_call_processing_status(call_id: str, user: Annotated[User, Depends
         data = r.json()
         started_at = data.get("startedAt")
         ended_at = data.get("endedAt")
-        status = data.get("status", "Unknown")
+        status_text = data.get("status", "Unknown")
 
         start_dt = _iso_to_dt(started_at)
         end_dt = _iso_to_dt(ended_at)
@@ -723,14 +885,14 @@ async def get_call_processing_status(call_id: str, user: Annotated[User, Depends
                 min_sents = 10
             transcript_status = "complete" if words >= min_words and sents >= min_sents else "partial"
 
-        is_processing = status in {"in-progress", "queued", "connecting"}
+        is_processing = status_text in {"in-progress", "queued", "connecting"}
         progress = None
         if duration and duration > 1800:
             progress = 100 if transcript_status == "complete" else 50 if transcript_status == "partial" else 25
 
         return {
             "call_id": call_id,
-            "status": status,
+            "status": status_text,
             "is_processing": is_processing,
             "call_duration": duration,
             "call_duration_minutes": (duration / 60) if duration else None,
@@ -747,7 +909,11 @@ async def get_call_processing_status(call_id: str, user: Annotated[User, Depends
         raise HTTPException(status_code=500, detail=f"Error checking call status: {str(e)}")
 
 # ------------------ Background task used above ------------------
-async def get_call_details(call_id: str, delay: int, user_id: int, lead_id: Optional[int] = None):
+async def get_call_details(call_id: str, delay: int, user_id: Optional[int], lead_id: Optional[int] = None):
+    """
+    After delay, re-fetch a call from Vapi (timestamps stabilize), update local CallLog,
+    run spam heuristic, and (idempotently) apply the billing debit.
+    """
     try:
         await asyncio.sleep(delay)
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -757,7 +923,7 @@ async def get_call_details(call_id: str, delay: int, user_id: int, lead_id: Opti
 
         call_data = r.json()
         started_at = call_data.get("startedAt")
-        ended_at = call_data.get("endedAt")
+        ended_at = call_data.get("EndedAt") or call_data.get("endedAt")  # tolerate casing variants
         start_dt = _iso_to_dt(started_at)
         end_dt = _iso_to_dt(ended_at)
         duration = (end_dt - start_dt).total_seconds() if start_dt and end_dt else 0
@@ -809,16 +975,32 @@ async def get_call_details(call_id: str, delay: int, user_id: int, lead_id: Opti
             )
 
         # --- Post-call auto-flag heuristic (spam) ---
-        # (1) Very short call note: heuristic works via daily stats; nothing to do here beyond saving duration
-        # (2) If many calls today and average duration is tiny -> temporary block
         await _auto_flag_spam(customer_number)
+
+        # --- Apply billing (idempotent) ---
+        uid = user_id
+        if not uid and call:
+            try:
+                uid = call.user_id  # FK id if present
+            except Exception:
+                try:
+                    await call.fetch_related("user")
+                    uid = call.user.id if call.user else None
+                except Exception:
+                    uid = None
+
+        debited, cents, err = await _bill_call_if_needed(
+            call_id=call_id, user_id=uid, duration_seconds=duration
+        )
+        if err and "Insufficient balance" in err:
+            # Optionally: log or emit an internal event/notification here
+            print(f"[billing] Insufficient balance for call {call_id} (charge_cents={cents})")
 
         # Optional: trigger downstream appointment extraction (internal service)
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 await client.post(
-                    # IMPORTANT: your live base must be reachable publicly if you expect this to be called externally.
-                    # This internal self-call is fine on the same machine.
+                    # IMPORTANT: live base must be reachable if called externally.
                     f"https://aisdr-dbt.ddns.net/api/appointments/from-call/{call_id}",
                     headers={"Authorization": f"Bearer {generate_token()}"},
                 )
@@ -826,4 +1008,3 @@ async def get_call_details(call_id: str, delay: int, user_id: int, lead_id: Opti
             print("appointment extract failed:", _e)
     except Exception as e:
         print(f"Error in get_call_details: {e}")
-        
