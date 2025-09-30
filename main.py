@@ -262,7 +262,7 @@ app.include_router(impersonate_router, prefix="/api", tags=["Admin-Login-AsUser"
 app.include_router(campaign_router, prefix="/api/campaigns", tags=["campaigns"])
 app.include_router(form_router, prefix="/api", tags=["Form details"])
 app.include_router(intake_admin_router, prefix="/api", tags=["intake-admin"])
-app.include_router(facebook_router, prefix="/api/facebook", tags=["Facebook Routes"])
+app.include_router(facebook_router, prefix="/api", tags=["Facebook Routes"])
 app.include_router(text_assistant_router, prefix="/api", tags=["Text Assistant Controller"])
 app.include_router(vapi_server_url, prefix="/api")
 app.include_router(stripe_controller , prefix="/api" , tags={"Stripe Controller"})
