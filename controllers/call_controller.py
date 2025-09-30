@@ -428,7 +428,7 @@
 #                 await client.post(
 #                     # IMPORTANT: your live base must be reachable publicly if you expect this to be called externally.
 #                     # This internal self-call is fine on the same machine.
-#                     f"https://aisdr-dbt.ddns.net/api/appointments/from-call/{call_id}",
+#                     f"https://app.thedbt.ai/api/appointments/from-call/{call_id}",
 #                     headers={"Authorization": f"Bearer {generate_token()}"},
 #                 )
 #         except Exception as _e:
@@ -1001,7 +1001,7 @@ async def get_call_details(call_id: str, delay: int, user_id: Optional[int], lea
             async with httpx.AsyncClient(timeout=15.0) as client:
                 await client.post(
                     # IMPORTANT: live base must be reachable if called externally.
-                    f"https://aisdr-dbt.ddns.net/api/appointments/from-call/{call_id}",
+                    f"https://app.thedbt.ai/api/appointments/from-call/{call_id}",
                     headers={"Authorization": f"Bearer {generate_token()}"},
                 )
         except Exception as _e:

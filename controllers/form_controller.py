@@ -270,7 +270,7 @@ async def copy_token(user: Annotated[User, Depends(get_current_user)]):
 
 @router.get("/form/copy-webhook-url")
 async def copy_webhook_url(user: Annotated[User, Depends(get_current_user)]):
-    url = f"https://aisdr-dbt.ddns.net/api/form/webhook?token={user.webhook_token}"
+    url = f"https://app.thedbt.ai/api/form/webhook?token={user.webhook_token}"
     return {"success": True, "webhook_url": url}
 
 @router.get("/form/copy-script")
@@ -283,7 +283,7 @@ async def copy_script(user: Annotated[User, Depends(get_current_user)]):
                 let json = {{}};
                 formData.forEach((v, k) => json[k] = v);
                 try {{
-                    await fetch("https://aisdr-dbt.ddns.net/api/form/webhook?token={user.webhook_token}", {{
+                    await fetch("https://app.thedbt.ai/api/form/webhook?token={user.webhook_token}", {{
                         method: "POST",
                         headers: {{"Content-Type": "application/json"}},
                         body: JSON.stringify(json)
@@ -317,7 +317,7 @@ async def copy_wordpress_plugin(user: Annotated[User, Depends(get_current_user)]
                     let json = {{}};
                     formData.forEach((v, k) => json[k] = v);
                     try {{
-                        await fetch("https://aisdr-dbt.ddns.net/webhook?token={user.webhook_token}", {{
+                        await fetch("https://app.thedbt.ai/webhook?token={user.webhook_token}", {{
                             method: "POST",
                             headers: {{"Content-Type": "application/json"}},
                             body: JSON.stringify(json)

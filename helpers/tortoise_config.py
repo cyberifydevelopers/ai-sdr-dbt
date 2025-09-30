@@ -26,7 +26,9 @@ TORTOISE_CONFIG = {
                 "models.facebook",
                 "models.message",
                 "models.call_blocklist",
-                "models.billing"
+                "models.billing",
+                "models.calendar_account",
+                "models.appointment_link"
             ]
         }
     }

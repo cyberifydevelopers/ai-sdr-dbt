@@ -225,6 +225,7 @@ from controllers.text_assistant_controller import (
 )
 
 from controllers.vapi_server_url import router as vapi_server_url
+from controllers.Calendar_controller import router as CalenderController
 
 # ----- Media setup -----
 MEDIA_ROOT = os.getenv("PROFILE_PHOTO_STORAGE", "media/profile_photos")
@@ -265,6 +266,7 @@ app.include_router(facebook_router, prefix="/api/facebook", tags=["Facebook Rout
 app.include_router(text_assistant_router, prefix="/api", tags=["Text Assistant Controller"])
 app.include_router(vapi_server_url, prefix="/api")
 app.include_router(stripe_controller , prefix="/api" , tags={"Stripe Controller"})
+app.include_router(CalenderController , prefix="/api"  , tags={"Calender Controller"})
 
 # ----- Root -----
 @app.get("/")
