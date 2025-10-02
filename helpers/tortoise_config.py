@@ -28,7 +28,8 @@ TORTOISE_CONFIG = {
                 "models.call_blocklist",
                 "models.billing",
                 "models.calendar_account",
-                "models.appointment_link"
+                "models.appointment_link",
+                "models.call_detail"
             ]
         }
     }
