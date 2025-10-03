@@ -568,8 +568,6 @@
 
 
 
-
-
 import asyncio
 from datetime import date, datetime, timedelta
 from typing import Annotated, List, Optional, Tuple
@@ -1296,4 +1294,4 @@ async def get_call_details(call_id: str, delay: int, user_id: Optional[int], lea
             print("appointment extract failed:", _e)
     except Exception as e:
         print(f"Error in get_call_details: {e}")
-x   
+
