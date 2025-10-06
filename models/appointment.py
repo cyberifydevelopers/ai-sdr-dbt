@@ -63,7 +63,7 @@ class Appointment(models.Model):
     title = fields.CharField(max_length=200)
     notes = fields.TextField(null=True)
     location = fields.CharField(max_length=200, null=True)
-
+    email = fields.CharField(max_length=320, null=True)  
     phone = fields.CharField(max_length=32)
     timezone = fields.CharField(max_length=64)
 

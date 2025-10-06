@@ -29,7 +29,8 @@ TORTOISE_CONFIG = {
                 "models.billing",
                 "models.calendar_account",
                 "models.appointment_link",
-                "models.call_detail"
+                "models.call_detail",
+                "models.email"
             ]
         }
     }

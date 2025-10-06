@@ -212,6 +212,8 @@ from scheduler.campaign_scheduler import (
     shutdown_scheduler,
 )
 
+# from controllers.email_assistant import schedule_email_job
+# schedule_email_job(timezone="UTC")
 from controllers.form_controller import router as form_router
 from helpers.intake_worker import start_scheduler, stop_scheduler
 from controllers.intake_admin import router as intake_admin_router
@@ -226,7 +228,8 @@ from controllers.text_assistant_controller import (
 
 from controllers.vapi_server_url import router as vapi_server_url
 from controllers.Calendar_controller import router as CalenderController
-
+from helpers.interest_scheduler import run_interest_scheduler
+# from controllers.email_assistant import router as emailassistant
 # ----- Media setup -----
 MEDIA_ROOT = os.getenv("PROFILE_PHOTO_STORAGE", "media/profile_photos")
 media_parent = Path(MEDIA_ROOT).parent
@@ -268,6 +271,7 @@ app.include_router(vapi_server_url, prefix="/api")
 app.include_router(stripe_controller , prefix="/api" , tags={"Stripe Controller"})
 app.include_router(CalenderController , prefix="/api"  , tags={"Calender Controller"})
 app.include_router(call_details , prefix="/api"   , tags={"User Call Logs"})
+# app.include_router (emailassistant , prefix="/api" , tags={"Email Assistant"} )
 # ----- Root -----
 @app.get("/")
 def greetings():
@@ -293,6 +297,10 @@ async def _rehydrate_campaign_jobs():
 # Intake worker lifecycle (unchanged)
 app.add_event_handler("startup", start_scheduler(app))
 app.add_event_handler("shutdown", stop_scheduler(app))
+
+
+_stop_event: asyncio.Event | None = None
+_task: asyncio.Task | None = None
 
 # ======= Startup: general scheduler + campaign reschedule =======
 @app.on_event("startup")
@@ -321,3 +329,22 @@ async def _kickoff_text_jobs():
 @app.on_event("shutdown")
 async def _shutdown_schedulers():
     shutdown_scheduler(wait=False)
+    
+    
+
+@app.on_event("startup")
+async def _startup():
+    global _stop_event, _task
+    _stop_event = asyncio.Event()
+    _task = asyncio.create_task(run_interest_scheduler(_stop_event))
+
+@app.on_event("shutdown")
+async def _shutdown():
+    global _stop_event, _task
+    if _stop_event:
+        _stop_event.set()
+    if _task:
+        try:
+            await asyncio.wait_for(_task, timeout=5)
+        except Exception:
+            pass

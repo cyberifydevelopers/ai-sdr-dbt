@@ -3,7 +3,7 @@
 # import asyncio
 # import json
 # import os
-# from typing import Annotated, List, Optional, Tuple, Dict, Any, AsyncGenerator
+# from typing import Annotated, List, Optional, Tuple, Dict, Any, AsyncGenerator, Literal
 # from urllib.parse import urlparse
 
 # from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, Form, Query
@@ -73,6 +73,17 @@
 #     phone_number: str
 #     assistant_id: Optional[int] = None
 #     kind: Optional[str] = Field(default=None, description="scheduled|unscheduled (advisory only)")
+
+# # === NEW: Daemon config/state schemas
+# Kind = Literal["scheduled", "unscheduled"]
+
+# class DaemonConfigRequest(BaseModel):
+#     kind: Kind
+#     enabled: Optional[bool] = None
+#     tick_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
+#     include_unowned: Optional[bool] = None  # scheduled only
+#     repeat_backoff_hours: Optional[int] = Field(default=None, ge=0, le=72)  # scheduled
+#     unscheduled_backoff_hours: Optional[int] = Field(default=None, ge=0, le=72)
 
 # # ─────────────────────────────────────────────────────────────────────────────
 # # Router / logger
@@ -286,9 +297,6 @@
 # # ─────────────────────────────────────────────────────────────────────────────
 
 # async def _recent_success_outbound_exists(phone: str, user: User, within_hours: int) -> bool:
-#     """
-#     True if we already sent a SUCCESSFUL message to this phone in the last `within_hours`.
-#     """
 #     if not phone:
 #         return False
 #     since = datetime.now(timezone.utc) - timedelta(hours=max(0, within_hours))
@@ -302,11 +310,6 @@
 #     include_unowned: bool,
 #     backoff_hours: int,
 # ) -> List[Appointment]:
-#     """
-#     SCHEDULED = eligible by default.
-#     Only block if we sent a successful outbound to the SAME phone within `backoff_hours`.
-#     No time-window/horizon filtering.
-#     """
 #     if include_unowned:
 #         appts_all = await Appointment.filter(status=AppointmentStatus.SCHEDULED).filter(
 #             Q(user=db_user) | Q(user_id=None)
@@ -316,7 +319,6 @@
 
 #     result: List[Appointment] = []
 #     for a in appts_all:
-#         # If sent recently (within backoff), skip; else eligible.
 #         already = await _recent_success_outbound_exists(a.phone, db_user, backoff_hours)
 #         if already:
 #             continue
@@ -324,7 +326,7 @@
 #     return result
 
 # # ─────────────────────────────────────────────────────────────────────────────
-# # SSE progress
+# # SSE progress (per-job, existing)
 # # ─────────────────────────────────────────────────────────────────────────────
 
 # def _make_sse_token(user_id: int, job_id: str, ttl_seconds: int = 600) -> str:
@@ -431,7 +433,7 @@
 #     return StreamingResponse(event_stream(), headers=headers)
 
 # # ─────────────────────────────────────────────────────────────────────────────
-# # Messages / Threads / Jobs
+# # Messages / Threads / Jobs (unchanged)
 # # ─────────────────────────────────────────────────────────────────────────────
 
 # @router.get("/text/messages")
@@ -580,7 +582,7 @@
 #     }
 
 # # ─────────────────────────────────────────────────────────────────────────────
-# # Assistants + Attach
+# # Assistants + Attach (unchanged)
 # # ─────────────────────────────────────────────────────────────────────────────
 
 # @router.post("/text-assistants")
@@ -653,7 +655,7 @@
 #     return {"success": True, "phone_number": row.phone_number, "attached_assistant": row.attached_assistant, "kind": payload.kind}
 
 # # ─────────────────────────────────────────────────────────────────────────────
-# # Send + Status + Inbound
+# # Send + Status + Inbound (unchanged)
 # # ─────────────────────────────────────────────────────────────────────────────
 
 # async def _resolve_from_number(db_user: User, assistant: Optional[Assistant], explicit_from: Optional[str]) -> PurchasedNumber:
@@ -691,7 +693,7 @@
 #             client=client,
 #             body=(payload.body or "")[:1000],
 #             from_number=from_num,
-#             to_number=to_num,
+#             to=to_num,
 #             status_callback=status_cb,
 #         )
 
@@ -848,7 +850,6 @@
 #     for appt in appointments:
 #         a = await _prefer_assistant_for_appt(db_user.id, appt, assistant)
 
-#         # craft SMS
 #         user_message = (
 #             f"Create a friendly, concise SMS about an appointment. "
 #             f"Include title '{appt.title}', time {appt.start_at.isoformat()} ({appt.timezone}), "
@@ -900,7 +901,7 @@
 #     return str(job.id)
 
 # # ─────────────────────────────────────────────────────────────────────────────
-# # SCHEDULED — new selection logic (always eligible except 7h backoff)
+# # SCHEDULED / UNSCHEDULED (existing one-off endpoints preserved)
 # # ─────────────────────────────────────────────────────────────────────────────
 
 # @router.post("/text/message-scheduled")
@@ -912,30 +913,24 @@
 # ):
 #     try:
 #         db_user = await User.get(id=user.id)
-
-#         # pick assistant
 #         if payload.assistant_id:
 #             assistant = await Assistant.get_or_none(id=payload.assistant_id, user=db_user)
 #             if not assistant:
 #                 raise HTTPException(status_code=404, detail="Assistant not found")
 #         else:
-#             # pick any enabled
 #             assistant = await Assistant.filter(user=db_user, assistant_toggle=True).first()
 #             if not assistant:
 #                 raise HTTPException(status_code=404, detail="No enabled assistant found")
 
 #         from_row = await _resolve_from_number(db_user, assistant, payload.from_number)
 
-#         # effective backoff hours = payload.repeat_backoff_hours or env REPEAT_BACKOFF_HOURS or 7
 #         backoff_h = payload.repeat_backoff_hours if payload.repeat_backoff_hours is not None else _env_int("REPEAT_BACKOFF_HOURS", 7)
 
-#         # core selection: SCHEDULED only, backoff filter only
 #         appts = await _eligible_scheduled_appointments(
 #             db_user=db_user,
 #             include_unowned=bool(payload.include_unowned),
 #             backoff_hours=max(0, backoff_h),
 #         )
-
 #         if payload.limit and payload.limit > 0:
 #             appts = appts[: payload.limit]
 
@@ -946,7 +941,7 @@
 #                 "success": True,
 #                 "sent": 0,
 #                 "results": [],
-#                 "detail": "No appointments eligible (likely due to 7h backoff).",
+#                 "detail": "No appointments eligible (likely due to backoff).",
 #                 "stats": {
 #                     "total_scheduled_all": total_all,
 #                     "total_scheduled_for_user": total_user,
@@ -984,10 +979,6 @@
 #         raise
 #     except Exception as e:
 #         raise HTTPException(status_code=400, detail=f"Error messaging scheduled appointments: {e}")
-
-# # ─────────────────────────────────────────────────────────────────────────────
-# # UNSCHEDULED (unchanged except optional backoff)
-# # ─────────────────────────────────────────────────────────────────────────────
 
 # @router.post("/text/message-unscheduled")
 # async def message_unscheduled_appointments(
@@ -1062,7 +1053,7 @@
 #         raise HTTPException(status_code=400, detail=f"Error messaging unscheduled appointments: {e}")
 
 # # ─────────────────────────────────────────────────────────────────────────────
-# # Debug: Scheduled Selection (reflects the new rule)
+# # Debug (unchanged rule text)
 # # ─────────────────────────────────────────────────────────────────────────────
 
 # @router.get("/text/debug/scheduled-selection")
@@ -1097,7 +1088,7 @@
 #             "start_at": (a.start_at.replace(tzinfo=ZoneInfo(a.timezone)) if (a.start_at and getattr(a, "timezone", None)) else a.start_at),
 #             "now": now,
 #             "backoff_ok": ok,
-#             "eligible": ok,  # identical per new rule
+#             "eligible": ok,
 #         })
 
 #     info = {
@@ -1108,90 +1099,339 @@
 #         "rule": "Scheduled = eligible unless already messaged successfully within backoff window.",
 #     }
 #     logger.info(f"[debug] scheduled_selection: {info}")
-#     return {"info": info, "samples": samples[:50]}  # cap for payload size
+#     return {"info": info, "samples": samples[:50]}
 
 # # ─────────────────────────────────────────────────────────────────────────────
-# # Scheduler (optional periodic run)
+# # === NEW: Always-on Texting Daemons (scheduled & unscheduled)
 # # ─────────────────────────────────────────────────────────────────────────────
 
-# async def _send_scheduled_for_user(user_id: int, request: Optional[Request] = None):
-#     db_user = await User.get(id=user_id)
-#     assistant = await Assistant.filter(user=db_user, assistant_toggle=True).first()
-#     if not assistant:
-#         return
-#     from_row = await PurchasedNumber.filter(user=db_user, attached_assistant=assistant.id).first() \
-#                or await PurchasedNumber.filter(user=db_user).first()
-#     if not from_row:
-#         return
+# class _DaemonState:
+#     def __init__(self, *, enabled: bool, tick_interval_seconds: int, include_unowned: bool,
+#                  repeat_backoff_hours: int, unscheduled_backoff_hours: int):
+#         self.enabled = enabled
+#         self.tick_interval_seconds = tick_interval_seconds
+#         self.include_unowned = include_unowned
+#         self.repeat_backoff_hours = repeat_backoff_hours
+#         self.unscheduled_backoff_hours = unscheduled_backoff_hours
 
-#     backoff_h = _env_int("REPEAT_BACKOFF_HOURS", 7)
-#     appts = await _eligible_scheduled_appointments(
-#         db_user=db_user, include_unowned=_env_bool("SCHEDULED_INCLUDE_UNOWNED", False), backoff_hours=backoff_h
+#         # live metrics
+#         self.status: str = "idle"          # idle|running|paused|error
+#         self.last_tick_at: Optional[datetime] = None
+#         self.last_error: Optional[str] = None
+
+#         # last cycle
+#         self.last_queue_size: int = 0
+#         self.last_sent: int = 0
+#         self.last_failed: int = 0
+
+#         # cumulative (since process start)
+#         self.total_sent: int = 0
+#         self.total_failed: int = 0
+
+# # per-process in-memory maps: DAEMONS[kind][user_id] = _DaemonState
+# DAEMONS: Dict[Kind, Dict[int, _DaemonState]] = {"scheduled": {}, "unscheduled": {}}
+# _DAEMON_TASKS: Dict[Kind, Optional[asyncio.Task]] = {"scheduled": None, "unscheduled": None}
+
+# def _get_default_state(kind: Kind) -> _DaemonState:
+#     return _DaemonState(
+#         enabled=True,
+#         tick_interval_seconds=_env_int("TEXTING_TICK_INTERVAL_SECONDS", 120),
+#         include_unowned=_env_bool("SCHEDULED_INCLUDE_UNOWNED", True),
+#         repeat_backoff_hours=_env_int("REPEAT_BACKOFF_HOURS", 7),
+#         unscheduled_backoff_hours=_env_int("UNSCHEDULED_BACKOFF_HOURS", _env_int("REPEAT_BACKOFF_HOURS", 7)),
 #     )
-#     if not appts:
+
+# def _user_daemon_state(kind: Kind, user_id: int) -> _DaemonState:
+#     if user_id not in DAEMONS[kind]:
+#         DAEMONS[kind][user_id] = _get_default_state(kind)
+#     return DAEMONS[kind][user_id]
+
+# async def _users_with(kind: Kind) -> List[int]:
+#     if kind == "scheduled":
+#         ids = await Appointment.filter(status=AppointmentStatus.SCHEDULED).values_list("user_id", flat=True)
+#     else:
+#         ids = await Appointment.exclude(status=AppointmentStatus.SCHEDULED).values_list("user_id", flat=True)
+#     return [uid for uid in set(ids) if uid]
+
+# async def _daemon_tick_for_user(kind: Kind, uid: int):
+#     state = _user_daemon_state(kind, uid)
+#     if not state.enabled:
+#         state.status = "paused"
 #         return
 
-#     class _DummyReq:
-#         base_url = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
-#     dummy_req = request or _DummyReq()
+#     db_user = await User.get_or_none(id=uid)
+#     if not db_user:
+#         return
 
-#     await _bulk_message_appointments_core(
-#         db_user=db_user, request=dummy_req, assistant=assistant, from_row=from_row, appointments=appts
-#     )
+#     try:
+#         state.status = "running"
+#         state.last_error = None
+#         state.last_sent = 0
+#         state.last_failed = 0
+#         state.last_queue_size = 0
 
+#         # pick assistant + number once per tick
+#         assistant = await Assistant.filter(user=db_user, assistant_toggle=True).first()
+#         if not assistant:
+#             state.status = "idle"
+#             return
+#         from_row = await PurchasedNumber.filter(user=db_user, attached_assistant=assistant.id).first() \
+#                    or await PurchasedNumber.filter(user=db_user).first()
+#         if not from_row:
+#             state.status = "idle"
+#             return
+
+#         # select appointments by kind
+#         if kind == "scheduled":
+#             appts = await _eligible_scheduled_appointments(
+#                 db_user=db_user,
+#                 include_unowned=state.include_unowned,
+#                 backoff_hours=max(0, state.repeat_backoff_hours),
+#             )
+#         else:
+#             appts_all = await Appointment.filter(user=db_user).exclude(status=AppointmentStatus.SCHEDULED).all()
+#             appts = []
+#             bh = max(0, state.unscheduled_backoff_hours)
+#             for a in appts_all:
+#                 if bh > 0 and await _recent_success_outbound_exists(a.phone, db_user, bh):
+#                     continue
+#                 appts.append(a)
+
+#         state.last_queue_size = len(appts)
+#         if not appts:
+#             state.status = "idle"
+#             return
+
+#         # create a job for this tick (for audit/history)
+#         # NOTE: we’ll send with default single message, no extra retries here.
+#         # You can parameterize these if you want per-daemon knobs.
+#         job = await MessageJob.create(
+#             user=db_user, assistant=assistant, from_number=from_row.phone_number,
+#             status="running", total=len(appts), sent=0, failed=0
+#         )
+
+#         # minimal Request substitute for callbacks if not available
+#         class _DummyReq:
+#             # allows _build_status_callback_url to construct callback from PUBLIC_BASE_URL
+#             url = type("U", (), {"path": "/api/text/sms-status", "query": ""})()
+#         request_like = _DummyReq()
+
+#         # send
+#         await _bulk_message_appointments_core(
+#             db_user=db_user, request=request_like, assistant=assistant, from_row=from_row, appointments=appts, job=job,
+#             messages_per_recipient=1, retry_count=0, retry_delay_seconds=60, per_message_delay_seconds=0,
+#         )
+
+#         # update metrics
+#         state.last_sent = job.sent or 0
+#         state.last_failed = job.failed or 0
+#         state.total_sent += state.last_sent
+#         state.total_failed += state.last_failed
+#         state.status = "idle"
+#     except Exception as e:
+#         state.last_error = str(e)
+#         state.status = "error"
+
+#     state.last_tick_at = datetime.now(timezone.utc)
+
+# async def _daemon_loop(kind: Kind):
+#     logger.info(f"[daemon] starting loop for {kind}")
+#     while True:
+#         try:
+#             user_ids = await _users_with(kind)
+#             # ensure we have state for any user we see
+#             for uid in user_ids:
+#                 _user_daemon_state(kind, uid)
+
+#             # tick each user (serially to avoid hammering Twilio);
+#             # you can asyncio.gather in small batches if you want parallelism per user.
+#             for uid in user_ids:
+#                 await _daemon_tick_for_user(kind, uid)
+
+#             # sleep = min per-user interval across all present users
+#             if user_ids:
+#                 intervals = [max(5, _user_daemon_state(kind, uid).tick_interval_seconds) for uid in user_ids]
+#                 sleep_for = min(intervals) if intervals else _env_int("TEXTING_TICK_INTERVAL_SECONDS", 120)
+#             else:
+#                 sleep_for = _env_int("TEXTING_TICK_INTERVAL_SECONDS", 120)
+#             await asyncio.sleep(sleep_for)
+#         except asyncio.CancelledError:
+#             logger.info(f"[daemon] loop for {kind} cancelled")
+#             break
+#         except Exception as e:
+#             logger.exception(f"[daemon] loop error for {kind}: {e}")
+#             await asyncio.sleep(5)
+
+# def _start_daemon_if_needed(kind: Kind):
+#     if _DAEMON_TASKS[kind] is None or _DAEMON_TASKS[kind].done():
+#         _DAEMON_TASKS[kind] = asyncio.create_task(_daemon_loop(kind))
+
+# # ─────────────────────────────────────────────────────────────────────────────
+# # === NEW: Daemon control + SSE
+# # ─────────────────────────────────────────────────────────────────────────────
+
+# def _make_daemon_token(user_id: int, kind: Kind, ttl_seconds: int = 600) -> str:
+#     exp = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+#     payload = {"id": user_id, "daemon_kind": kind, "kind": "daemon_sse", "exp": exp}
+#     return generate_user_token(payload)
+
+# def _validate_daemon_token(token: str, expected_kind: Kind) -> Optional[int]:
+#     try:
+#         claims = decode_user_token(token)
+#         if not isinstance(claims, dict): return None
+#         if claims.get("kind") != "daemon_sse": return None
+#         if claims.get("daemon_kind") != expected_kind: return None
+#         uid = claims.get("id")
+#         return uid if isinstance(uid, int) else None
+#     except Exception:
+#         return None
+
+# @router.get("/text/daemon/state")
+# async def get_daemon_state(
+#     kind: Kind = Query(...),
+#     user: Annotated[User, Depends(get_current_user)] = None,
+# ):
+#     st = _user_daemon_state(kind, user.id)
+#     return {
+#         "kind": kind,
+#         "enabled": st.enabled,
+#         "status": st.status,
+#         "tick_interval_seconds": st.tick_interval_seconds,
+#         "include_unowned": st.include_unowned,
+#         "repeat_backoff_hours": st.repeat_backoff_hours,
+#         "unscheduled_backoff_hours": st.unscheduled_backoff_hours,
+#         "last_tick_at": st.last_tick_at,
+#         "last_error": st.last_error,
+#         "last_queue_size": st.last_queue_size,
+#         "last_sent": st.last_sent,
+#         "last_failed": st.last_failed,
+#         "total_sent": st.total_sent,
+#         "total_failed": st.total_failed,
+#         "sse_token": _make_daemon_token(user.id, kind),
+#     }
+
+# @router.put("/text/daemon/config")
+# async def update_daemon_config(
+#     payload: DaemonConfigRequest,
+#     user: Annotated[User, Depends(get_current_user)] = None,
+# ):
+#     st = _user_daemon_state(payload.kind, user.id)
+#     if payload.enabled is not None:
+#         st.enabled = bool(payload.enabled)
+#         st.status = "paused" if not st.enabled else "idle"
+#     if payload.tick_interval_seconds is not None:
+#         st.tick_interval_seconds = int(payload.tick_interval_seconds)
+#     if payload.kind == "scheduled":
+#         if payload.include_unowned is not None:
+#             st.include_unowned = bool(payload.include_unowned)
+#         if payload.repeat_backoff_hours is not None:
+#             st.repeat_backoff_hours = int(payload.repeat_backoff_hours)
+#     else:
+#         if payload.unscheduled_backoff_hours is not None:
+#             st.unscheduled_backoff_hours = int(payload.unscheduled_backoff_hours)
+
+#     # ensure loop is running
+#     _start_daemon_if_needed(payload.kind)
+#     return {"success": True, "state": await get_daemon_state(kind=payload.kind, user=user)}  # reuse serializer
+
+# @router.get("/text/daemon-progress-sse")
+# async def daemon_progress_sse(
+#     request: Request,
+#     kind: Kind = Query(...),
+#     token: Optional[str] = Query(default=None),
+#     sse: Optional[str] = Query(default=None),
+# ):
+#     auth_user: Optional[User] = None
+#     try:
+#         if sse:
+#             uid = _validate_daemon_token(sse, kind)
+#             if uid is not None:
+#                 auth_user = await User.get_or_none(id=uid)
+#         if not auth_user:
+#             auth_header = request.headers.get("Authorization")
+#             raw = None
+#             if auth_header and auth_header.lower().startswith("bearer "):
+#                 raw = auth_header.split(" ", 1)[1]
+#             elif token:
+#                 raw = token
+#             else:
+#                 raw = request.cookies.get("token") or request.cookies.get("access_token") or request.cookies.get("Authorization")
+#             if raw:
+#                 creds = decode_user_token(raw)
+#                 uid = creds.get("id") if isinstance(creds, dict) else None
+#                 if uid is not None:
+#                     auth_user = await User.get_or_none(id=uid)
+#     except Exception:
+#         auth_user = None
+
+#     if not auth_user:
+#         raise HTTPException(status_code=403, detail="Not authenticated")
+
+#     # make sure loop is running so user sees updates
+#     _start_daemon_if_needed(kind)
+
+#     async def event_stream() -> AsyncGenerator[bytes, None]:
+#         last: Dict[str, Any] = {}
+#         while True:
+#             if await request.is_disconnected():
+#                 break
+#             st = _user_daemon_state(kind, auth_user.id)
+#             payload = {
+#                 "kind": kind,
+#                 "enabled": st.enabled,
+#                 "status": st.status,
+#                 "tick_interval_seconds": st.tick_interval_seconds,
+#                 "include_unowned": st.include_unowned,
+#                 "repeat_backoff_hours": st.repeat_backoff_hours,
+#                 "unscheduled_backoff_hours": st.unscheduled_backoff_hours,
+#                 "last_tick_at": st.last_tick_at.isoformat() if st.last_tick_at else None,
+#                 "last_error": st.last_error,
+#                 "last_queue_size": st.last_queue_size,
+#                 "last_sent": st.last_sent,
+#                 "last_failed": st.last_failed,
+#                 "total_sent": st.total_sent,
+#                 "total_failed": st.total_failed,
+#             }
+#             if payload != last:
+#                 yield f"data: {json.dumps(payload, default=str)}\n\n".encode("utf-8")
+#                 last = payload
+#             await asyncio.sleep(1.0)
+
+#     headers = {"Cache-Control": "no-cache", "Content-Type": "text/event-stream", "Connection": "keep-alive"}
+#     return StreamingResponse(event_stream(), headers=headers)
+
+# # ─────────────────────────────────────────────────────────────────────────────
+# # Scheduler wiring
+# # ─────────────────────────────────────────────────────────────────────────────
+
+# # (compat) these previously existed; keep them as wrappers if something calls them.
 # async def run_texting_job():
-#     user_ids = await Appointment.filter(status=AppointmentStatus.SCHEDULED).values_list("user_id", flat=True)
-#     seen = set()
-#     for uid in user_ids:
-#         if uid and uid not in seen:
-#             seen.add(uid)
-#             try:
-#                 await _send_scheduled_for_user(uid)
-#             except Exception:
-#                 continue
+#     # Trigger a single scheduled tick for all users (compat)
+#     for uid in await _users_with("scheduled"):
+#         await _daemon_tick_for_user("scheduled", uid)
 
 # async def run_unscheduled_texting_job():
-#     user_ids = await Appointment.exclude(status=AppointmentStatus.SCHEDULED).values_list("user_id", flat=True)
-#     seen = set()
-#     for uid in user_ids:
-#         if uid and uid not in seen:
-#             seen.add(uid)
-#             try:
-#                 db_user = await User.get(id=uid)
-#                 assistant = await Assistant.filter(user=db_user, assistant_toggle=True).first()
-#                 if not assistant:
-#                     continue
-#                 from_row = await PurchasedNumber.filter(user=db_user, attached_assistant=assistant.id).first() \
-#                            or await PurchasedNumber.filter(user=db_user).first()
-#                 if not from_row:
-#                     continue
-#                 class _DummyReq:
-#                     base_url = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
-#                 dummy_req = _DummyReq()
-
-#                 appts_all = await Appointment.filter(user=db_user).exclude(status=AppointmentStatus.SCHEDULED).all()
-#                 backoff_h = _env_int("UNSCHEDULED_BACKOFF_HOURS", _env_int("REPEAT_BACKOFF_HOURS", 7))
-#                 appts = []
-#                 for a in appts_all:
-#                     if backoff_h > 0 and await _recent_success_outbound_exists(a.phone, db_user, backoff_h):
-#                         continue
-#                     appts.append(a)
-#                 if appts:
-#                     await _bulk_message_appointments_core(
-#                         db_user=db_user, request=dummy_req, assistant=assistant, from_row=from_row, appointments=appts
-#                     )
-#             except Exception:
-#                 continue
+#     # Trigger a single unscheduled tick for all users (compat)
+#     for uid in await _users_with("unscheduled"):
+#         await _daemon_tick_for_user("unscheduled", uid)
 
 # def schedule_texting_job(timezone: str = "UTC"):
-#     schedule_minutely_job("texting-scheduled-appointments", timezone, run_texting_job)
-#     schedule_minutely_job("texting-unscheduled-appointments", timezone, run_unscheduled_texting_job)
-#     nudge_once(run_texting_job, delay_seconds=3)
+#     """
+#     Old code scheduled minutely jobs. We now start the long-running daemon loops
+#     once at startup. Keeping these calls so existing startup code still works.
+#     """
+#     # kick off the loops once the event loop is alive
+#     nudge_once(lambda: _start_daemon_if_needed("scheduled"), delay_seconds=0)
+#     nudge_once(lambda: _start_daemon_if_needed("unscheduled"), delay_seconds=0)
+#     # (Optional) also keep a periodic nudge in case the loop ever dies
+#     schedule_minutely_job("texting-daemon-nudge-scheduled", timezone, lambda: _start_daemon_if_needed("scheduled"))
+#     schedule_minutely_job("texting-daemon-nudge-unscheduled", timezone, lambda: _start_daemon_if_needed("unscheduled"))
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import asyncio
 import json
 import os
+import re
 from typing import Annotated, List, Optional, Tuple, Dict, Any, AsyncGenerator, Literal
 from urllib.parse import urlparse
 
@@ -1205,6 +1445,9 @@ import httpx
 from twilio.rest import Client
 from twilio.request_validator import RequestValidator
 from twilio.base.exceptions import TwilioRestException
+
+import phonenumbers
+from phonenumbers.phonenumberutil import NumberParseException
 
 from tortoise.expressions import Q
 
@@ -1263,7 +1506,7 @@ class AttachAssistantRequest(BaseModel):
     assistant_id: Optional[int] = None
     kind: Optional[str] = Field(default=None, description="scheduled|unscheduled (advisory only)")
 
-# === NEW: Daemon config/state schemas
+# === Daemon config/state schemas
 Kind = Literal["scheduled", "unscheduled"]
 
 class DaemonConfigRequest(BaseModel):
@@ -1304,6 +1547,62 @@ def _env_int(name: str, default: int) -> int:
 
 def _sanitize_phone(s: Optional[str]) -> str:
     return (s or "").strip()
+
+def _default_region() -> str:
+    return (os.getenv("DEFAULT_SMS_REGION") or "US").upper()
+
+def _parse_to_e164(raw: Optional[str], region: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Returns (ok, e164, error). Accepts local formats and normalizes to +E.164.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return (False, None, "empty_number")
+    try:
+        region = (region or _default_region()).upper()
+        num = phonenumbers.parse(s, region)
+        if not phonenumbers.is_possible_number(num):
+            return (False, None, "not_possible")
+        if not phonenumbers.is_valid_number(num):
+            return (False, None, "not_valid")
+        e164 = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
+        return (True, e164, None)
+    except NumberParseException as e:
+        return (False, None, f"parse_error:{e.error_type}")
+
+def _format_dt_local(dt: datetime, tz: Optional[str]) -> str:
+    try:
+        if tz:
+            return dt.astimezone(ZoneInfo(tz)).strftime("%b %d, %I:%M %p")
+    except Exception:
+        pass
+    return dt.strftime("%b %d, %I:%M %p")
+
+# —— SMS copy cleanup ——
+_COMPACT_RE = [
+    (re.compile(r"^sure!.*?:\s*", re.I | re.S), ""),
+    (re.compile(r"^here(?:'s| is).{0,80}:\s*", re.I | re.S), ""),
+    (re.compile(r"^[-–—\s]*$", re.M), ""),
+    (re.compile(r"[`*_#>]+"), ""),
+    (re.compile(r"[^\S\r\n]+"), " "),
+    (re.compile(r"\n{3,}"), "\n\n"),
+    (re.compile(r"[^\w\s.,:;!?+\-()/]"), ""),  # strip emojis/odd unicode
+]
+def _compact_sms(text: str, hard_limit: int = 240) -> str:
+    s = (text or "").strip()
+    for pat, rep in _COMPACT_RE:
+        s = pat.sub(rep, s)
+    s = s.replace("\r", "")
+    lines = [ln.strip() for ln in s.split("\n") if ln.strip()]
+    s = " ".join(lines)  # single paragraph
+    if len(s) > hard_limit:
+        s = s[:hard_limit].rstrip(". ,;:") + "..."
+    return s
+
+def _fallback_appt_sms(appt: Appointment) -> str:
+    when = _format_dt_local(appt.start_at, getattr(appt, "timezone", None))
+    title = (appt.title or "your appointment").strip()
+    return f"{title} on {when}. Reply YES to confirm or NO to reschedule."
 
 def _twilio_client_from_values(account_sid: Optional[str], auth_token: Optional[str]) -> Tuple[Client, str, str]:
     sid = account_sid or os.getenv("TWILIO_ACCOUNT_SID")
@@ -1622,7 +1921,7 @@ async def stream_message_progress_sse(
     return StreamingResponse(event_stream(), headers=headers)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Messages / Threads / Jobs (unchanged)
+# Messages / Threads / Jobs
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/text/messages")
@@ -1771,7 +2070,7 @@ async def get_message_job(job_id: str, user: Annotated[User, Depends(get_current
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Assistants + Attach (unchanged)
+# Assistants + Attach
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/text-assistants")
@@ -1844,7 +2143,7 @@ async def attach_assistant_to_number(payload: AttachAssistantRequest, user: Anno
     return {"success": True, "phone_number": row.phone_number, "attached_assistant": row.attached_assistant, "kind": payload.kind}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Send + Status + Inbound (unchanged)
+# Send + Status + Inbound
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _resolve_from_number(db_user: User, assistant: Optional[Assistant], explicit_from: Optional[str]) -> PurchasedNumber:
@@ -1874,13 +2173,25 @@ async def send_text_message(
         from_row = await _resolve_from_number(db_user, None, payload.from_number)
         status_cb = _build_status_callback_url(request, payload.status_webhook)
 
-        to_num = _sanitize_phone(payload.to_number)
-        from_num = _sanitize_phone(from_row.phone_number)
-        logger.info(f"[send] to={to_num} from={from_num}")
+        ok_to, to_num, to_err = _parse_to_e164(payload.to_number)
+        if not ok_to:
+            await _store_record_outbound(
+                job=None, user=db_user, assistant=None, appointment=None,
+                to_number=_sanitize_phone(payload.to_number), from_number="", body=payload.body,
+                sid=None, success=False, error=f"invalid_to_number:{to_err}"
+            )
+            raise HTTPException(status_code=400, detail={"twilio_error": {"code": 21211, "message": f"Invalid To number ({to_err})"}})
 
+        ok_from, from_num, from_err = _parse_to_e164(from_row.phone_number)
+        if not ok_from:
+            raise HTTPException(status_code=400, detail=f"Invalid from_number ({from_err}) in your PurchasedNumber")
+
+        body = _compact_sms(payload.body)
+
+        logger.info(f"[send] to={to_num} from={from_num}")
         msg = await _twilio_send_message(
             client=client,
-            body=(payload.body or "")[:1000],
+            body=(body or "")[:1000],
             from_number=from_num,
             to=to_num,
             status_callback=status_cb,
@@ -1888,11 +2199,18 @@ async def send_text_message(
 
         await _store_record_outbound(
             job=None, user=db_user, assistant=None, appointment=None,
-            to_number=to_num, from_number=from_num, body=payload.body, sid=getattr(msg, "sid", None), success=True
+            to_number=to_num, from_number=from_num, body=body, sid=getattr(msg, "sid", None), success=True
         )
         return {"success": True, "message_sid": getattr(msg, "sid", None)}
     except TwilioRestException as e:
-        detail = {"message": getattr(e, "msg", str(e)), "status": getattr(e, "status", None), "code": getattr(e, "code", None), "more_info": getattr(e, "more_info", None)}
+        code = getattr(e, "code", None)
+        msg  = getattr(e, "msg", str(e))
+        if code == 21211:
+            detail = {"code": 21211, "message": "Invalid To number"}
+        elif code in (21612, 21610):
+            detail = {"code": code, "message": msg}
+        else:
+            detail = {"code": code, "message": msg}
         logger.error(f"[send] twilio_error to={_sanitize_phone(payload.to_number)} code={detail['code']} msg={detail['message']}")
         raise HTTPException(status_code=400, detail={"twilio_error": detail})
     except Exception as e:
@@ -1969,7 +2287,7 @@ async def twilio_sms_webhook(
             assistant = await Assistant.filter(user=user, assistant_toggle=True).first()
 
         if not assistant:
-            msg_text = Body or "Thanks for your message."
+            msg_text = _compact_sms(Body or "Thanks for your message.")
             await _twilio_send_message(client, msg_text, To, From, None)
             await _store_record_outbound(
                 job=None, user=user, assistant=None, appointment=None,
@@ -1979,7 +2297,7 @@ async def twilio_sms_webhook(
 
         system_prompt = getattr(assistant, "systemPrompt", None) or "You are a helpful SMS assistant. Keep replies short and useful."
         generated = await _generate_via_vapi_or_openai(system_prompt, Body or "", user=user)
-        reply_text = generated or "Thanks for your message. We'll get back to you shortly."
+        reply_text = _compact_sms(generated or "Thanks for your message. We'll get back to you shortly.")
 
         status_cb = _build_status_callback_url(request)
         msg = await _twilio_send_message(client, reply_text[:1000], To, From, status_cb)
@@ -2036,38 +2354,57 @@ async def _bulk_message_appointments_core(
 
     status_cb = _build_status_callback_url(request)
 
+    # normalize FROM once
+    ok_from, e164_from, from_err = _parse_to_e164(from_row.phone_number)
+    if not ok_from:
+        # config issue: mark whole job as failed-ish but continue per appt to log errors
+        e164_from = None
+
     for appt in appointments:
         a = await _prefer_assistant_for_appt(db_user.id, appt, assistant)
 
+        # validate destination before generating text
+        ok_to, e164_to, to_err = _parse_to_e164(appt.phone)
+        if not ok_to or not e164_from:
+            await _store_record_outbound(
+                job=job, user=db_user, assistant=a or assistant, appointment=appt,
+                to_number=_sanitize_phone(appt.phone), from_number=_sanitize_phone(from_row.phone_number),
+                body="", sid=None, success=False,
+                error=f"{'invalid_from_number:'+from_err if not e164_from else ''}{' ' if (not e164_from and not ok_to) else ''}{'invalid_to_number:'+to_err if not ok_to else ''}".strip()
+            )
+            job.failed += 1
+            continue
+
         user_message = (
-            f"Create a friendly, concise SMS about an appointment. "
-            f"Include title '{appt.title}', time {appt.start_at.isoformat()} ({appt.timezone}), "
-            f"and ask to reply YES to confirm or NO to reschedule."
+            "Write a short SMS (max ~2 sentences) to remind about an appointment.\n"
+            f"Title: {appt.title}\n"
+            f"When: {_format_dt_local(appt.start_at, getattr(appt, 'timezone', None))}\n"
+            "Tone: clear, friendly, professional.\n"
+            "Constraints: Plain text only. No emojis, no headings, no code fences, no markdown.\n"
+            "End with: 'Reply YES to confirm or NO to reschedule.'\n"
+            "Output ONLY the message, no preface."
         )
         generated = await _generate_via_vapi_or_openai(
             system_prompt if not a else getattr(a, "systemPrompt", system_prompt),
             user_message,
             db_user
-        ) or (
-            f"Hi! Reminder for '{appt.title}' on {appt.start_at.isoformat()} ({appt.timezone}). "
-            f"Reply YES to confirm or NO to reschedule."
         )
+        attempt_body = _compact_sms(generated or _fallback_appt_sms(appt))[:1000]
 
         for msg_ix in range(max(1, messages_per_recipient)):
-            attempt_body = generated[:1000]
             attempts_remaining = 1 + max(0, retry_count)
             while attempts_remaining > 0:
                 try:
                     msg = await _twilio_send_message(
                         client=client,
                         body=attempt_body,
-                        from_number=_sanitize_phone(from_row.phone_number),
-                        to_number=_sanitize_phone(appt.phone),
+                        from_number=e164_from,
+                        to_number=e164_to,
                         status_callback=status_cb,
                     )
                     await _store_record_outbound(
                         job=job, user=db_user, assistant=a or assistant, appointment=appt,
-                        to_number=_sanitize_phone(appt.phone), from_number=_sanitize_phone(from_row.phone_number),
+                        to_number=e164_to, from_number=e164_from,
                         body=attempt_body, sid=getattr(msg, "sid", None), success=True
                     )
                     job.sent += 1
@@ -2075,7 +2412,7 @@ async def _bulk_message_appointments_core(
                 except Exception as e:
                     await _store_record_outbound(
                         job=job, user=db_user, assistant=a or assistant, appointment=appt,
-                        to_number=_sanitize_phone(appt.phone), from_number=_sanitize_phone(from_row.phone_number),
+                        to_number=e164_to, from_number=e164_from,
                         body=attempt_body, sid=None, success=False, error=str(e)
                     )
                     job.failed += 1
@@ -2090,7 +2427,7 @@ async def _bulk_message_appointments_core(
     return str(job.id)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SCHEDULED / UNSCHEDULED (existing one-off endpoints preserved)
+# SCHEDULED / UNSCHEDULED
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/text/message-scheduled")
@@ -2291,7 +2628,7 @@ async def debug_scheduled_selection(
     return {"info": info, "samples": samples[:50]}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# === NEW: Always-on Texting Daemons (scheduled & unscheduled)
+# Always-on Texting Daemons (scheduled & unscheduled)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _DaemonState:
@@ -2317,7 +2654,6 @@ class _DaemonState:
         self.total_sent: int = 0
         self.total_failed: int = 0
 
-# per-process in-memory maps: DAEMONS[kind][user_id] = _DaemonState
 DAEMONS: Dict[Kind, Dict[int, _DaemonState]] = {"scheduled": {}, "unscheduled": {}}
 _DAEMON_TASKS: Dict[Kind, Optional[asyncio.Task]] = {"scheduled": None, "unscheduled": None}
 
@@ -2359,7 +2695,6 @@ async def _daemon_tick_for_user(kind: Kind, uid: int):
         state.last_failed = 0
         state.last_queue_size = 0
 
-        # pick assistant + number once per tick
         assistant = await Assistant.filter(user=db_user, assistant_toggle=True).first()
         if not assistant:
             state.status = "idle"
@@ -2370,7 +2705,6 @@ async def _daemon_tick_for_user(kind: Kind, uid: int):
             state.status = "idle"
             return
 
-        # select appointments by kind
         if kind == "scheduled":
             appts = await _eligible_scheduled_appointments(
                 db_user=db_user,
@@ -2391,27 +2725,20 @@ async def _daemon_tick_for_user(kind: Kind, uid: int):
             state.status = "idle"
             return
 
-        # create a job for this tick (for audit/history)
-        # NOTE: we’ll send with default single message, no extra retries here.
-        # You can parameterize these if you want per-daemon knobs.
         job = await MessageJob.create(
             user=db_user, assistant=assistant, from_number=from_row.phone_number,
             status="running", total=len(appts), sent=0, failed=0
         )
 
-        # minimal Request substitute for callbacks if not available
         class _DummyReq:
-            # allows _build_status_callback_url to construct callback from PUBLIC_BASE_URL
             url = type("U", (), {"path": "/api/text/sms-status", "query": ""})()
         request_like = _DummyReq()
 
-        # send
         await _bulk_message_appointments_core(
             db_user=db_user, request=request_like, assistant=assistant, from_row=from_row, appointments=appts, job=job,
             messages_per_recipient=1, retry_count=0, retry_delay_seconds=60, per_message_delay_seconds=0,
         )
 
-        # update metrics
         state.last_sent = job.sent or 0
         state.last_failed = job.failed or 0
         state.total_sent += state.last_sent
@@ -2428,16 +2755,11 @@ async def _daemon_loop(kind: Kind):
     while True:
         try:
             user_ids = await _users_with(kind)
-            # ensure we have state for any user we see
             for uid in user_ids:
                 _user_daemon_state(kind, uid)
-
-            # tick each user (serially to avoid hammering Twilio);
-            # you can asyncio.gather in small batches if you want parallelism per user.
             for uid in user_ids:
                 await _daemon_tick_for_user(kind, uid)
 
-            # sleep = min per-user interval across all present users
             if user_ids:
                 intervals = [max(5, _user_daemon_state(kind, uid).tick_interval_seconds) for uid in user_ids]
                 sleep_for = min(intervals) if intervals else _env_int("TEXTING_TICK_INTERVAL_SECONDS", 120)
@@ -2456,7 +2778,7 @@ def _start_daemon_if_needed(kind: Kind):
         _DAEMON_TASKS[kind] = asyncio.create_task(_daemon_loop(kind))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# === NEW: Daemon control + SSE
+# Daemon control + SSE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_daemon_token(user_id: int, kind: Kind, ttl_seconds: int = 600) -> str:
@@ -2519,9 +2841,8 @@ async def update_daemon_config(
         if payload.unscheduled_backoff_hours is not None:
             st.unscheduled_backoff_hours = int(payload.unscheduled_backoff_hours)
 
-    # ensure loop is running
     _start_daemon_if_needed(payload.kind)
-    return {"success": True, "state": await get_daemon_state(kind=payload.kind, user=user)}  # reuse serializer
+    return {"success": True, "state": await get_daemon_state(kind=payload.kind, user=user)}
 
 @router.get("/text/daemon-progress-sse")
 async def daemon_progress_sse(
@@ -2556,7 +2877,6 @@ async def daemon_progress_sse(
     if not auth_user:
         raise HTTPException(status_code=403, detail="Not authenticated")
 
-    # make sure loop is running so user sees updates
     _start_daemon_if_needed(kind)
 
     async def event_stream() -> AsyncGenerator[bytes, None]:
@@ -2593,25 +2913,19 @@ async def daemon_progress_sse(
 # Scheduler wiring
 # ─────────────────────────────────────────────────────────────────────────────
 
-# (compat) these previously existed; keep them as wrappers if something calls them.
 async def run_texting_job():
-    # Trigger a single scheduled tick for all users (compat)
     for uid in await _users_with("scheduled"):
         await _daemon_tick_for_user("scheduled", uid)
 
 async def run_unscheduled_texting_job():
-    # Trigger a single unscheduled tick for all users (compat)
     for uid in await _users_with("unscheduled"):
         await _daemon_tick_for_user("unscheduled", uid)
 
 def schedule_texting_job(timezone: str = "UTC"):
     """
-    Old code scheduled minutely jobs. We now start the long-running daemon loops
-    once at startup. Keeping these calls so existing startup code still works.
+    Start long-running daemon loops once at startup. Keep periodic nudges for resiliency.
     """
-    # kick off the loops once the event loop is alive
     nudge_once(lambda: _start_daemon_if_needed("scheduled"), delay_seconds=0)
     nudge_once(lambda: _start_daemon_if_needed("unscheduled"), delay_seconds=0)
-    # (Optional) also keep a periodic nudge in case the loop ever dies
     schedule_minutely_job("texting-daemon-nudge-scheduled", timezone, lambda: _start_daemon_if_needed("scheduled"))
     schedule_minutely_job("texting-daemon-nudge-unscheduled", timezone, lambda: _start_daemon_if_needed("unscheduled"))
