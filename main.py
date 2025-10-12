@@ -52,9 +52,9 @@ from controllers.calldetails_controller import router as call_details
 # >>> Text Assistant API + scheduler nudge <<<
 from controllers.text_assistant_controller import (
     router as text_assistant_router,
-    schedule_texting_job,   # <-- this exists in your controller
+    # schedule_texting_job,   # <-- this exists in your controller
 )
-
+from controllers.admin_billing import router as admin_payment_controls
 from controllers.vapi_server_url import router as vapi_server_url
 from controllers.Calendar_controller import router as CalenderController
 from helpers.interest_scheduler import run_interest_scheduler
@@ -101,6 +101,7 @@ app.include_router(stripe_controller , prefix="/api" , tags={"Stripe Controller"
 app.include_router(CalenderController , prefix="/api"  , tags={"Calender Controller"})
 app.include_router(call_details , prefix="/api"   , tags={"User Call Logs"})
 # app.include_router (emailassistant , prefix="/api" , tags={"Email Assistant"} )
+app.include_router(admin_payment_controls , prefix="/api"   , tags={"admin payment controls"})
 # ----- Root -----
 @app.get("/")
 def greetings():
