@@ -47,6 +47,7 @@
 
 # models/appointment.py
 from enum import Enum
+from models.lead import Lead
 from tortoise import fields, models
 
 class AppointmentStatus(str, Enum):
@@ -76,6 +77,8 @@ class Appointment(models.Model):
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
 
+
     class Meta:
         table = "appointments"
         indexes = (("user_id", "start_at"), ("user_id", "phone"))
+

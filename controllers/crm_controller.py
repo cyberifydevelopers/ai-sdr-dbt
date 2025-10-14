@@ -41,11 +41,18 @@
 #             "type": "oauth",
 #         },
 #         "ghl": {
+#             # If you have a marketplace install URL, put it here (we'll append ?state=...)
 #             "install_url": os.getenv("GHL_INSTALL_URL", ""),
+#             # Otherwise we build Choose Location with base+path below
 #             "install_base": os.getenv("GHL_INSTALL_BASE", "https://marketplace.gohighlevel.com"),
 #             "auth_path": "/oauth/chooselocation",
 #             "token_url": os.getenv("GHL_TOKEN_URL", "https://services.leadconnectorhq.com/oauth/token"),
 #             "contacts_url": os.getenv("GHL_CONTACTS_URL", "https://services.leadconnectorhq.com/contacts/"),
+#             # Helpful to identify the connected user/account explicitly
+#             "userinfo_url": os.getenv("GHL_USERINFO_URL", "https://services.leadconnectorhq.com/oauth/userinfo"),
+#             # Optional version header (GHL often expects a version header)
+#             "version_header_name": os.getenv("GHL_VERSION_HEADER_NAME", "Version"),
+#             "api_version": os.getenv("GHL_API_VERSION", ""),  # e.g. "2021-07-28" (leave blank if not needed)
 #             "client_id": os.getenv("GHL_CLIENT_ID", ""),
 #             "client_secret": os.getenv("GHL_CLIENT_SECRET", ""),
 #             "redirect_uri": os.getenv("GHL_REDIRECT_URI", ""),
@@ -142,17 +149,51 @@
 #                     raise HTTPException(401, "HubSpot token validation failed.")
 
 #         elif crm == "ghl":
-#             contacts_url = _cfg()["ghl"]["contacts_url"].rstrip("/")
-#             probe = f"{contacts_url}?limit=1"
-#             r = await client.get(
-#                 probe,
-#                 headers={"Authorization": f"Bearer {acc.access_token}", "Accept": "application/json"},
-#             )
-#             if not r.is_success:
-#                 logger.error("GHL verify failed: %s %s", r.status_code, r.text[:200])
-#                 raise HTTPException(401, "GHL token validation failed.")
-#             acc.external_account_name = acc.external_account_name or "GHL"
-#             logger.info("GHL verify ok")
+#             # Prefer userinfo to fill account metadata
+#             ghl_cfg = _cfg()["ghl"]
+#             headers = _ghl_headers(acc)
+#             ui = await client.get(ghl_cfg["userinfo_url"], headers=headers)
+#             if ui.is_success:
+#                 info = ui.json() or {}
+#                 # Best-effort mapping (GHL payloads can vary by scope/tenant)
+#                 # Try to pin an account/location/business ID; otherwise fall back to user id
+#                 acc.external_account_id = str(
+#                     info.get("accountId")
+#                     or info.get("businessId")
+#                     or info.get("companyId")
+#                     or info.get("locationId")
+#                     or info.get("userId")
+#                     or info.get("id")
+#                     or ""
+#                 )
+#                 acc.external_account_name = (
+#                     info.get("businessName")
+#                     or info.get("accountName")
+#                     or info.get("companyName")
+#                     or info.get("email")
+#                     or info.get("name")
+#                     or acc.external_account_name
+#                     or "GHL"
+#                 )
+
+#                 # Save a little metadata for transparency/debug
+#                 meta = _acc_meta(acc)
+#                 meta.setdefault("ghl", {})
+#                 safe_ui = {k: v for k, v in info.items() if isinstance(v, (str, int, float, bool, type(None)))}
+#                 meta["ghl"]["userinfo"] = safe_ui
+#                 await _save_acc_meta(acc, meta)
+#                 logger.info("GHL verify via userinfo ok id=%s name=%s",
+#                             acc.external_account_id, acc.external_account_name)
+#             else:
+#                 # Fallback: probe contacts endpoint (ensures token is valid)
+#                 contacts_url = ghl_cfg["contacts_url"].rstrip("/")
+#                 probe = f"{contacts_url}?limit=1"
+#                 r = await client.get(probe, headers=headers)
+#                 if not r.is_success:
+#                     logger.error("GHL verify failed: %s %s", r.status_code, r.text[:200])
+#                     raise HTTPException(401, "GHL token validation failed.")
+#                 acc.external_account_name = acc.external_account_name or "GHL"
+#                 logger.info("GHL verify via contacts ok")
 
 #         elif crm == "monday":
 #             q = """
@@ -301,8 +342,10 @@
 #     elif crm == "ghl":
 #         install_url = (cfg["install_url"] or "").strip()
 #         if install_url:
+#             # If marketplace gives you a complete link, we just append state
 #             auth_url = _append_qs(install_url, {"state": state})
 #         else:
+#             # Fallback: standard choose-location screen
 #             built = f'{cfg["install_base"].rstrip("/")}{cfg["auth_path"]}'
 #             params = {
 #                 "response_type": "code",
@@ -461,6 +504,17 @@
 
 # def _monday_headers(acc: IntegrationAccount) -> Dict[str, str]:
 #     return {"Authorization": f"Bearer {acc.access_token}", "Content-Type": "application/json"}
+
+# def _ghl_headers(acc: IntegrationAccount) -> Dict[str, str]:
+#     cfg = _cfg()["ghl"]
+#     headers = {
+#         "Authorization": f"Bearer {acc.access_token}",
+#         "Accept": "application/json",
+#     }
+#     # Optional version header if configured
+#     if cfg.get("api_version"):
+#         headers[cfg.get("version_header_name") or "Version"] = cfg["api_version"]
+#     return headers
 
 # async def _get_active_account(user: User, crm: str) -> IntegrationAccount:
 #     acc = await IntegrationAccount.get_or_none(user_id=user.id, crm=crm.lower(), is_active=True)
@@ -646,11 +700,12 @@
 #             url = contacts_url
 #             params = {"limit": limit}
 #             if cursor:
+#                 # different deployments might use different paging keys
 #                 params.update({"cursor": cursor, "nextPageToken": cursor, "page": cursor})
 
 #             r = await client.get(
 #                 url,
-#                 headers={"Authorization": f"Bearer {acc.access_token}", "Accept": "application/json"},
+#                 headers=_ghl_headers(acc),
 #                 params=params,
 #             )
 #             if not r.is_success:
@@ -658,6 +713,7 @@
 #             j = r.json() if r.text else {}
 
 #             data_list = None
+#             # Try common shapes: {"contacts":[...]}, {"data":[...]}, {"items":[...]} or raw list
 #             for key in ("contacts", "data", "items", "results"):
 #                 if isinstance(j.get(key), list):
 #                     data_list = j.get(key)
@@ -680,6 +736,7 @@
 #                 )
 #                 items.append(_norm(cid, full or None, email, phone, state, c))
 
+#             # Paging tokens meta
 #             if isinstance(j.get("meta"), dict):
 #                 meta = j["meta"]
 #                 raw_paging["meta"] = meta
@@ -977,28 +1034,6 @@
 #         results.append(await _sync_one_crm(user, acc.crm))
 
 #     return {"success": True, "ran": len(connected), "details": results}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import os
 import json
 import secrets
@@ -1021,10 +1056,6 @@ from models.lead import Lead
 router = APIRouter()
 logger = logging.getLogger("crm")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Config (HubSpot + GHL + Monday)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _cfg() -> Dict[str, Dict[str, str]]:
     return {
         "hubspot": {
@@ -1041,25 +1072,20 @@ def _cfg() -> Dict[str, Dict[str, str]]:
             "type": "oauth",
         },
         "ghl": {
-            # If you have a marketplace install URL, put it here (we'll append ?state=...)
             "install_url": os.getenv("GHL_INSTALL_URL", ""),
-            # Otherwise we build Choose Location with base+path below
             "install_base": os.getenv("GHL_INSTALL_BASE", "https://marketplace.gohighlevel.com"),
             "auth_path": "/oauth/chooselocation",
             "token_url": os.getenv("GHL_TOKEN_URL", "https://services.leadconnectorhq.com/oauth/token"),
             "contacts_url": os.getenv("GHL_CONTACTS_URL", "https://services.leadconnectorhq.com/contacts/"),
-            # Helpful to identify the connected user/account explicitly
             "userinfo_url": os.getenv("GHL_USERINFO_URL", "https://services.leadconnectorhq.com/oauth/userinfo"),
-            # Optional version header (GHL often expects a version header)
             "version_header_name": os.getenv("GHL_VERSION_HEADER_NAME", "Version"),
-            "api_version": os.getenv("GHL_API_VERSION", ""),  # e.g. "2021-07-28" (leave blank if not needed)
+            "api_version": os.getenv("GHL_API_VERSION", ""),
             "client_id": os.getenv("GHL_CLIENT_ID", ""),
             "client_secret": os.getenv("GHL_CLIENT_SECRET", ""),
             "redirect_uri": os.getenv("GHL_REDIRECT_URI", ""),
             "scope": os.getenv("GHL_SCOPES", "contacts.readonly contacts.write"),
             "type": "oauth",
         },
-        # MONDAY
         "monday": {
             "auth_url": os.getenv("MONDAY_AUTH_URL", "https://auth.monday.com/oauth2/authorize"),
             "token_url": os.getenv("MONDAY_TOKEN_URL", "https://auth.monday.com/oauth2/token"),
@@ -1068,25 +1094,18 @@ def _cfg() -> Dict[str, Dict[str, str]]:
             "client_secret": os.getenv("MONDAY_CLIENT_SECRET", ""),
             "redirect_uri": os.getenv("MONDAY_REDIRECT_URI", ""),
             "scope": os.getenv("MONDAY_SCOPES", ""),
-            # Optional owner column for per-user privacy (people column id)
             "owner_col": os.getenv("MONDAY_OWNER_COLUMN_ID", ""),
-            # Optional IDs to help pick email/phone/state columns
             "email_col": os.getenv("MONDAY_EMAIL_COLUMN_ID", ""),
             "phone_col": os.getenv("MONDAY_PHONE_COLUMN_ID", ""),
             "state_col": os.getenv("MONDAY_STATE_COLUMN_ID", ""),
-            # subdomain targeting + install behavior
             "subdomain": os.getenv("MONDAY_SUBDOMAIN", ""),
-            "subdomain_strategy": os.getenv("MONDAY_SUBDOMAIN_STRATEGY", "param"),  # "param" | "host"
+            "subdomain_strategy": os.getenv("MONDAY_SUBDOMAIN_STRATEGY", "param"),
             "force_install_if_needed": (os.getenv("MONDAY_FORCE_INSTALL_IF_NEEDED", "false") or "").lower() == "true",
             "type": "oauth",
         },
     }
 
 SUPPORTED = ("hubspot", "ghl", "monday")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -1120,10 +1139,6 @@ async def _save_acc_meta(acc: IntegrationAccount, meta: Dict[str, Any]) -> None:
     acc.metadata = meta
     await acc.save()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Token verification
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
     async with httpx.AsyncClient(timeout=30.0) as client:
         if crm == "hubspot":
@@ -1149,14 +1164,11 @@ async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
                     raise HTTPException(401, "HubSpot token validation failed.")
 
         elif crm == "ghl":
-            # Prefer userinfo to fill account metadata
             ghl_cfg = _cfg()["ghl"]
             headers = _ghl_headers(acc)
             ui = await client.get(ghl_cfg["userinfo_url"], headers=headers)
             if ui.is_success:
                 info = ui.json() or {}
-                # Best-effort mapping (GHL payloads can vary by scope/tenant)
-                # Try to pin an account/location/business ID; otherwise fall back to user id
                 acc.external_account_id = str(
                     info.get("accountId")
                     or info.get("businessId")
@@ -1175,8 +1187,6 @@ async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
                     or acc.external_account_name
                     or "GHL"
                 )
-
-                # Save a little metadata for transparency/debug
                 meta = _acc_meta(acc)
                 meta.setdefault("ghl", {})
                 safe_ui = {k: v for k, v in info.items() if isinstance(v, (str, int, float, bool, type(None)))}
@@ -1185,7 +1195,6 @@ async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
                 logger.info("GHL verify via userinfo ok id=%s name=%s",
                             acc.external_account_id, acc.external_account_name)
             else:
-                # Fallback: probe contacts endpoint (ensures token is valid)
                 contacts_url = ghl_cfg["contacts_url"].rstrip("/")
                 probe = f"{contacts_url}?limit=1"
                 r = await client.get(probe, headers=headers)
@@ -1227,55 +1236,40 @@ async def _verify_and_fill_account(crm: str, acc: IntegrationAccount) -> None:
             acc.external_account_name = acct.get("name") or me.get("email") or me.get("name") or "monday"
             logger.info("monday verify ok account_id=%s name=%s",
                         acc.external_account_id, acc.external_account_name)
-
         else:
             raise HTTPException(400, "Unsupported CRM for verification")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Refresh tokens (OAuth2)
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def _ensure_fresh_token(crm: str, acc: IntegrationAccount) -> IntegrationAccount:
     SKEW_SECONDS = 120
     if acc.expires_at and (acc.expires_at - _now()).total_seconds() > SKEW_SECONDS:
         return acc
-
     cfg = _cfg()[crm]
-    # MONDAY: tokens do not expire and no refresh_token is issued.
     if not acc.refresh_token:
         logger.debug("%s: no refresh_token present; assuming still valid", crm)
         return acc
-
     data: Dict[str, Any] = {
         "grant_type": "refresh_token",
         "refresh_token": acc.refresh_token,
         "client_id": cfg["client_id"],
         "client_secret": cfg["client_secret"],
     }
-
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(cfg["token_url"], data=data)
         if not r.is_success:
             logger.error("%s refresh failed: %s %s", crm, r.status_code, r.text[:300])
             raise HTTPException(401, f"{crm} refresh failed: {r.text}")
         j = r.json()
-
     def _get_exp(v, default=3600):
         try:
             return int(v)
         except Exception:
             return default
-
     acc.access_token = j.get("access_token") or acc.access_token
     acc.refresh_token = acc.refresh_token or j.get("refresh_token")
     acc.expires_at = _exp_from_seconds(_get_exp(j.get("expires_in", 3600)))
     await acc.save()
     logger.info("%s refreshed; exp=%s", crm, acc.expires_at)
     return acc
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Public routes (generic)
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/crm/providers")
 async def list_providers():
@@ -1306,10 +1300,6 @@ async def list_accounts(user: User = Depends(get_current_user)):
         } for r in rows
     ]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OAuth start/callback
-# ─────────────────────────────────────────────────────────────────────────────
-
 @router.post("/crm/connect/{crm}")
 async def start_connect(
     crm: str,
@@ -1319,16 +1309,13 @@ async def start_connect(
     crm = crm.lower()
     if crm not in SUPPORTED:
         raise HTTPException(400, "Unsupported CRM")
-
     cfg = _cfg()[crm]
     if not all([cfg["client_id"], cfg["client_secret"], cfg["redirect_uri"]]):
         raise HTTPException(500, f"{crm} OAuth app not configured (env missing).")
-
     state = secrets.token_urlsafe(24)
     await IntegrationOAuthState.create(
         user=user, crm=crm, state=state, redirect_to=_sanitize_redirect(redirect_to or "/user/CRM")
     )
-
     if crm == "hubspot":
         params = {
             "client_id": cfg["client_id"],
@@ -1338,14 +1325,11 @@ async def start_connect(
             "state": state,
         }
         auth_url = f'{cfg["auth_url"]}?{httpx.QueryParams(params)}'
-
     elif crm == "ghl":
         install_url = (cfg["install_url"] or "").strip()
         if install_url:
-            # If marketplace gives you a complete link, we just append state
             auth_url = _append_qs(install_url, {"state": state})
         else:
-            # Fallback: standard choose-location screen
             built = f'{cfg["install_base"].rstrip("/")}{cfg["auth_path"]}'
             params = {
                 "response_type": "code",
@@ -1355,8 +1339,7 @@ async def start_connect(
                 "state": state,
             }
             auth_url = f"{built}?{urlencode(params)}"
-
-    else:  # monday
+    else:
         params = {
             "client_id": cfg["client_id"],
             "redirect_uri": cfg["redirect_uri"],
@@ -1367,7 +1350,6 @@ async def start_connect(
             params["scope"] = cfg["scope"]
         if cfg.get("force_install_if_needed"):
             params["force_install_if_needed"] = "true"
-
         sub = (cfg.get("subdomain") or "").strip()
         strat = (cfg.get("subdomain_strategy") or "param").lower()
         if sub:
@@ -1379,7 +1361,6 @@ async def start_connect(
                 auth_url = f'{cfg["auth_url"]}?{httpx.QueryParams(params)}'
         else:
             auth_url = f'{cfg["auth_url"]}?{httpx.QueryParams(params)}'
-
     logger.info("oauth start crm=%s user=%s state=%s", crm, user.id, state)
     return {"auth_url": auth_url}
 
@@ -1394,24 +1375,20 @@ async def oauth_callback(
     crm = crm.lower()
     if crm not in SUPPORTED:
         return JSONResponse(status_code=400, content={"detail": "Unsupported CRM or wrong flow."})
-
     st = await IntegrationOAuthState.get_or_none(state=state, crm=crm)
     if not st:
         return JSONResponse(status_code=400, content={"detail": "Invalid or expired OAuth state."})
-
     back = _sanitize_redirect(st.redirect_to or "/user/CRM")
     cfg = _cfg()[crm]
-
     if error:
         await st.delete()
         logger.warning("oauth error crm=%s state=%s error=%s", crm, state, error)
         return RedirectResponse(url=f"{back}?crm={crm}&status=error&reason={quote_plus(error)}")
-
     if not code:
         await st.delete()
         logger.warning("oauth no_code crm=%s state=%s", crm, state)
+        # FIXED: removed stray brace
         return RedirectResponse(url=f"{back}?crm={crm}&status=error&reason=no_code")
-
     data = {
         "grant_type": "authorization_code",
         "code": code,
@@ -1419,7 +1396,6 @@ async def oauth_callback(
         "client_id": cfg["client_id"],
         "client_secret": cfg["client_secret"],
     }
-
     logger.info("oauth exchanging code crm=%s state=%s", crm, state)
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(cfg["token_url"], data=data)
@@ -1429,17 +1405,14 @@ async def oauth_callback(
                          crm, r.status_code, r.text[:300])
             return RedirectResponse(url=f"{back}?crm={crm}&status=error&reason=token_exchange_failed")
         j = r.json()
-
     acc = await IntegrationAccount.get_or_none(user_id=st.user_id, crm=crm)
     if not acc:
         acc = await IntegrationAccount.create(user_id=st.user_id, crm=crm)
-
     def _as_int(v, default=3600):
         try:
             return int(v)
         except Exception:
             return default
-
     acc.access_token = j.get("access_token")
     if crm == "monday":
         acc.refresh_token = None
@@ -1448,7 +1421,6 @@ async def oauth_callback(
         acc.refresh_token = j.get("refresh_token") or acc.refresh_token
         acc.expires_at = _exp_from_seconds(_as_int(j.get("expires_in", 3600)))
     await acc.save()
-
     try:
         await _verify_and_fill_account(crm, acc)
     except HTTPException as e:
@@ -1456,7 +1428,6 @@ async def oauth_callback(
         await st.delete()
         logger.error("oauth verify failed crm=%s detail=%s", crm, e.detail)
         return RedirectResponse(url=f"{back}?crm={crm}&status=error&reason={quote_plus(str(e.detail))}")
-
     acc.is_active = True
     if crm == "monday":
         meta = _acc_meta(acc)
@@ -1465,14 +1436,9 @@ async def oauth_callback(
         await _save_acc_meta(acc, meta)
     else:
         await acc.save()
-
     await st.delete()
     logger.info("oauth success crm=%s user=%s", crm, acc.user_id if hasattr(acc, "user_id") else st.user_id)
     return RedirectResponse(url=f"{back}?crm={crm}&status=success")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Connect/disconnect/fresh
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.delete("/crm/disconnect/{crm}")
 async def disconnect(crm: str, user: User = Depends(get_current_user)):
@@ -1498,10 +1464,6 @@ async def ensure_fresh(crm: str, user: User = Depends(get_current_user)):
     acc = await _ensure_fresh_token(crm, acc)
     return {"success": True, "expires_at": acc.expires_at}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Monday: board discovery & selection (per-user)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _monday_headers(acc: IntegrationAccount) -> Dict[str, str]:
     return {"Authorization": f"Bearer {acc.access_token}", "Content-Type": "application/json"}
 
@@ -1511,7 +1473,6 @@ def _ghl_headers(acc: IntegrationAccount) -> Dict[str, str]:
         "Authorization": f"Bearer {acc.access_token}",
         "Accept": "application/json",
     }
-    # Optional version header if configured
     if cfg.get("api_version"):
         headers[cfg.get("version_header_name") or "Version"] = cfg["api_version"]
     return headers
@@ -1537,7 +1498,6 @@ async def monday_list_boards(
 ):
     acc = await _get_active_account(user, "monday")
     api_url = _cfg()["monday"]["api_url"]
-
     q = """
     query($limit: Int!, $page: Int) {
       boards (limit: $limit, page: $page) {
@@ -1549,7 +1509,6 @@ async def monday_list_boards(
       }
     }
     """
-
     items: List[Dict[str, Any]] = []
     page = 1
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1565,11 +1524,9 @@ async def monday_list_boards(
             if len(bs) < 100:
                 break
             page += 1
-
     if search:
         s = search.strip().lower()
         items = [b for b in items if s in str(b.get("name","")).lower()]
-
     return {
         "items": [
             {"id": int(b["id"]), "name": b.get("name"), "state": b.get("state"), "kind": b.get("board_kind"),
@@ -1596,8 +1553,6 @@ async def monday_select_board(
 ):
     acc = await _get_active_account(user, "monday")
     board_id = payload.board_id
-
-    # Validate the board exists & is accessible
     api_url = _cfg()["monday"]["api_url"]
     q = """
     query($ids: [ID!]) {
@@ -1613,14 +1568,12 @@ async def monday_select_board(
         if not boards:
             raise HTTPException(404, "Board not found or not accessible by this token.")
         name = boards[0].get("name")
-
     meta = _acc_meta(acc)
     meta.setdefault("monday", {})
     meta["monday"]["board_id"] = int(board_id)
     meta["monday"]["board_name"] = payload.board_name or name
     meta["monday"]["board_selected"] = True
     await _save_acc_meta(acc, meta)
-
     return {"success": True, "selected": {"board_id": meta["monday"]["board_id"], "board_name": meta["monday"]["board_name"]}}
 
 @router.delete("/crm/monday/board")
@@ -1633,10 +1586,6 @@ async def monday_clear_board(user: User = Depends(get_current_user)):
     meta["monday"]["board_selected"] = False
     await _save_acc_meta(acc, meta)
     return {"success": True}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Contacts / Leads fetchers (normalize to Lead-like rows)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _norm(
     id: Any,
@@ -1662,19 +1611,13 @@ async def fetch_contacts(
     limit: int = Query(25, ge=1, le=100),
     cursor: Optional[str] = Query(None, description="Opaque paging cursor/token"),
 ):
-    """
-    HubSpot / GHL -> contacts
-    Monday -> user's leads from their selected board (per-user privacy).
-    """
     crm = crm.lower()
     if crm not in SUPPORTED:
         raise HTTPException(400, "Unsupported CRM")
-
     acc = await _get_active_account(user, crm)
     items: list = []
     next_cursor: Optional[str] = None
     raw_paging: Dict[str, Any] = {}
-
     async with httpx.AsyncClient(timeout=30.0) as client:
         if crm == "hubspot":
             params = {"limit": limit, "properties": "firstname,lastname,email,phone,company,state"}
@@ -1694,33 +1637,23 @@ async def fetch_contacts(
                 items.append(_norm(o.get("id"), name or None, p.get("email"), p.get("phone"), p.get("state"), o))
             next_cursor = ((j.get("paging") or {}).get("next") or {}).get("after")
             raw_paging = j.get("paging") or {}
-
         elif crm == "ghl":
             contacts_url = _cfg()["ghl"]["contacts_url"].rstrip("/")
             url = contacts_url
             params = {"limit": limit}
             if cursor:
-                # different deployments might use different paging keys
                 params.update({"cursor": cursor, "nextPageToken": cursor, "page": cursor})
-
-            r = await client.get(
-                url,
-                headers=_ghl_headers(acc),
-                params=params,
-            )
+            r = await client.get(url, headers=_ghl_headers(acc), params=params)
             if not r.is_success:
                 raise HTTPException(r.status_code, f"GHL contacts fetch failed: {r.text[:300]}")
             j = r.json() if r.text else {}
-
             data_list = None
-            # Try common shapes: {"contacts":[...]}, {"data":[...]}, {"items":[...]} or raw list
             for key in ("contacts", "data", "items", "results"):
                 if isinstance(j.get(key), list):
                     data_list = j.get(key)
                     break
             if data_list is None and isinstance(j, list):
                 data_list = j
-
             for c in (data_list or []):
                 cid = c.get("id") or c.get("_id") or c.get("contactId")
                 first = c.get("firstName") or c.get("first_name")
@@ -1735,8 +1668,6 @@ async def fetch_contacts(
                     or None
                 )
                 items.append(_norm(cid, full or None, email, phone, state, c))
-
-            # Paging tokens meta
             if isinstance(j.get("meta"), dict):
                 meta = j["meta"]
                 raw_paging["meta"] = meta
@@ -1751,28 +1682,21 @@ async def fetch_contacts(
                     if j.get(k):
                         next_cursor = str(j.get(k))
                         break
-
-        else:  # MONDAY -> per-user board leads
+        else:
             cfgm = _cfg()["monday"]
             api_url = cfgm["api_url"]
             headers = _monday_headers(acc)
-
-            # selected board (per-user)
             board_id = _get_selected_monday_board(acc)
             if not board_id:
                 raise HTTPException(
                     status_code=409,
-                    detail={"message": "monday: Leads board not selected yet.",
-                            "needs_board_selection": True}
+                    detail={"message": "monday: Leads board not selected yet.", "needs_board_selection": True}
                 )
-
-            # me.id for filtering
             q_me = "query { me { id } }"
             r_me = await client.post(api_url, headers=headers, json={"query": q_me})
             if not r_me.is_success:
                 raise HTTPException(r_me.status_code, f"monday me() failed: {r_me.text[:300]}")
             me_id = str(((r_me.json() or {}).get("data") or {}).get("me", {}).get("id") or "")
-
             q_items = """
             query($board_id: [ID!], $limit: Int!, $cursor: String) {
               boards(ids: $board_id) {
@@ -1793,11 +1717,7 @@ async def fetch_contacts(
               }
             }
             """
-            vars_ = {
-                "board_id": [int(board_id)],
-                "limit": int(limit),
-                "cursor": cursor if cursor not in (None, "", "null") else None,
-            }
+            vars_ = {"board_id": [int(board_id)], "limit": int(limit), "cursor": cursor if cursor not in (None, "", "null") else None}
             ri = await client.post(api_url, headers=headers, json={"query": q_items, "variables": vars_})
             if not ri.is_success:
                 raise HTTPException(ri.status_code, f"monday items_page failed: {ri.text[:300]}")
@@ -1806,14 +1726,11 @@ async def fetch_contacts(
             page = (boards[0].get("items_page") if boards else None) or {}
             next_cursor = page.get("cursor")
             raw_paging["cursor"] = next_cursor
-
             email_col = (cfgm.get("email_col") or "").strip()
             phone_col = (cfgm.get("phone_col") or "").strip()
             state_col = (cfgm.get("state_col") or "").strip()
             owner_col = (cfgm.get("owner_col") or "").strip()
-
             def _owned_by_me(cv_list: List[Dict[str, Any]]) -> bool:
-                """True if owner_col contains me_id (people column)."""
                 if not owner_col:
                     return False
                 for cv in cv_list or []:
@@ -1828,18 +1745,14 @@ async def fetch_contacts(
                         except Exception:
                             return False
                 return False
-
             for it in (page.get("items") or []):
                 cv_list = it.get("column_values") or []
-
-                # privacy: each user sees only their leads
                 if owner_col:
                     if not _owned_by_me(cv_list):
                         continue
                 else:
                     if str(it.get("creator_id")) != me_id:
                         continue
-
                 name = it.get("name")
                 email = None
                 phone = None
@@ -1854,15 +1767,9 @@ async def fetch_contacts(
                         phone = text or phone
                     if state is None and (state_col and cid == state_col):
                         state = text or state
-
                 items.append(_norm(it.get("id"), name, email, phone, state, it))
-
     logger.info("contacts/leads fetched crm=%s items=%s next=%s", crm, len(items), bool(next_cursor))
     return {"items": items, "next_cursor": next_cursor, "raw_paging": raw_paging}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Treat Contacts as Leads -> auto-create "<CRM> Leads" file and upsert
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _split_name(full_name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     if not full_name:
@@ -1901,6 +1808,16 @@ async def _ensure_file(user: User, name: str) -> FileModel:
         logger.info("created file '%s' (id=%s) for user=%s", name, file.id, user.id)
     return file
 
+def _infer_origin_from_file_name(file_name: str) -> str:
+    n = (file_name or "").strip().lower()
+    if "hubspot leads" in n:
+        return "HubSpot CRM"
+    if "ghl leads" in n:
+        return "GHL CRM"
+    if "monday leads" in n:
+        return "Monday CRM"
+    return "CSV"
+
 async def _upsert_lead_from_contact(file: FileModel, item: Dict[str, Any], crm: str) -> Tuple[bool, bool]:
     full_name = item.get("name")
     first, last = _split_name(full_name)
@@ -1916,6 +1833,7 @@ async def _upsert_lead_from_contact(file: FileModel, item: Dict[str, Any], crm: 
         or raw.get("account")
         or ""
     )
+    origin_target = _infer_origin_from_file_name(file.name)
 
     existing = await Lead.get_or_none(file_id=file.id, salesforce_id=external_id)
     payload = {
@@ -1941,18 +1859,18 @@ async def _upsert_lead_from_contact(file: FileModel, item: Dict[str, Any], crm: 
         if existing.file_id != file.id:
             existing.file = file
             changed = True
+        if existing.origin != origin_target:
+            existing.origin = origin_target
+            changed = True
         if changed:
             await existing.save()
             return (False, True)
         return (False, False)
 
     new = Lead(file=file, **payload)
+    new.origin = origin_target
     await new.save()
     return (True, False)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Sync endpoints
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def _sync_one_crm(user: User, crm: str) -> Dict[str, Any]:
     crm = crm.lower()
@@ -1961,17 +1879,12 @@ async def _sync_one_crm(user: User, crm: str) -> Dict[str, Any]:
     acc = await IntegrationAccount.get_or_none(user_id=user.id, crm=crm, is_active=True)
     if not acc:
         raise HTTPException(404, f"Not connected to {crm}.")
-
     label_map = {"hubspot": "HubSpot", "ghl": "GHL", "monday": "Monday"}
     label = label_map.get(crm, crm)
     file_name = f"{label} Leads"
-
-    # Monday: ensure board selected before sync
     if crm == "monday" and not _get_selected_monday_board(acc):
         return {"crm": crm, "error": "monday: board not selected", "needs_board_selection": True}
-
     file = await _ensure_file(user, file_name)
-
     try:
         items = await _fetch_all_contacts(user, crm)
         created = 0
@@ -1980,10 +1893,10 @@ async def _sync_one_crm(user: User, crm: str) -> Dict[str, Any]:
             c, u = await _upsert_lead_from_contact(file, it, crm)
             created += int(c)
             updated += int(u)
-
+        # enforce correct origin for the entire file
+        await Lead.filter(file=file).update(origin=_infer_origin_from_file_name(file.name))
         logger.info("sync ok crm=%s file=%s fetched=%s created=%s updated=%s",
                     crm, file.id, len(items), created, updated)
-
         return {
             "crm": crm,
             "file_id": file.id,
@@ -2011,7 +1924,6 @@ async def ingest_ghl(user: User = Depends(get_current_user)):
 
 @router.post("/crm/ingest/monday")
 async def ingest_monday(user: User = Depends(get_current_user)):
-    """Create/Update 'Monday Leads' and pull the *current user's* leads from the selected board."""
     out = await _sync_one_crm(user, "monday")
     return {"success": True, "details": [out]}
 
@@ -2028,9 +1940,7 @@ async def sync_connected_crms_to_files(
             raise HTTPException(404, f"Not connected to {crm}.")
     if not connected:
         return {"success": True, "ran": 0, "details": []}
-
     results = []
     for acc in connected:
         results.append(await _sync_one_crm(user, acc.crm))
-
     return {"success": True, "ran": len(connected), "details": results}

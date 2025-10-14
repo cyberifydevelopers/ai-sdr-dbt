@@ -23,6 +23,9 @@ class User(Model):
     per_minute_cents = fields.IntField(default=10)       
 
     transactions = fields.ReverseRelation['AccountTransaction']
+    consent_to_call = fields.BooleanField(default=False, description="User asserts they have consent to call uploaded leads")
+    consent_note = fields.TextField(null=True, description="Optional context/description for consent")
+    consent_updated_at = fields.DatetimeField(null=True)
     
 class Code(Model):
     __tablename__ = 'codes'
