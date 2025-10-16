@@ -930,17 +930,6 @@
 
 
 
-
-# controllers/campaign_controller.py (UPDATED)
-# ——————————————————————————————————————————————————————————
-# Notes:
-# • Added rich logging + print() “breadcrumbs” at all key points.
-# • Kept your original logic & models intact; only tightened safety checks,
-#   clarified timezone handling, and added diagnostics.
-# • Use app-level logging config to emit INFO/DEBUG to console/file.
-# • If you truly want console prints in prod, keep them; otherwise remove.
-# ——————————————————————————————————————————————————————————
-
 import logging
 import asyncio
 from datetime import datetime, date, time, timedelta

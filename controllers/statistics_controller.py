@@ -165,11 +165,11 @@ async def get_statistics_advanced(
     # ── Call Details (VAPI-enriched) ─────────────────────────────────────────
     cd_q = CallDetail.filter(user_id=user.id)
     total_cd = await cd_q.count()
-    success_status_rows = await cd_q.annotate(c=Count("id")).group_by("success_evaluation_status").values(
-        "success_evaluation_status", "c"
+    success_status_rows = await cd_q.annotate(c=Count("id")).group_by("status").values(
+        "status", "c"
     )
     success_evaluation_breakdown = {
-        (row["success_evaluation_status"] or "unknown"): row["c"] for row in success_status_rows
+        (row["status"] or "unknown"): row["c"] for row in success_status_rows
     }
     success_like = sum(
         v for k, v in success_evaluation_breakdown.items()
