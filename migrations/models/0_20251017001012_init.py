@@ -256,23 +256,31 @@ CREATE TABLE IF NOT EXISTS "crm_sync_items" (
 );
 CREATE TABLE IF NOT EXISTS "appointments" (
     "id" UUID NOT NULL  PRIMARY KEY,
+    "assistant_id" VARCHAR(191),
+    "source_call_id" VARCHAR(191),
+    "source_transcript_id" VARCHAR(191),
     "title" VARCHAR(200) NOT NULL,
     "notes" TEXT,
-    "location" VARCHAR(200),
-    "email" VARCHAR(320),
     "phone" VARCHAR(32) NOT NULL,
+    "location" VARCHAR(200),
     "timezone" VARCHAR(64) NOT NULL,
     "start_at" TIMESTAMPTZ NOT NULL,
     "end_at" TIMESTAMPTZ NOT NULL,
     "duration_minutes" INT NOT NULL,
-    "status" VARCHAR(9) NOT NULL,
+    "status" VARCHAR(16) NOT NULL,
+    "extraction_version" VARCHAR(32),
+    "extraction_confidence" DOUBLE PRECISION,
+    "extraction_raw" JSONB,
     "created_at" TIMESTAMPTZ NOT NULL  DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL  DEFAULT CURRENT_TIMESTAMP,
-    "user_id" INT REFERENCES "user" ("id") ON DELETE CASCADE
+    "user_id" INT NOT NULL REFERENCES "user" ("id") ON DELETE CASCADE,
+    CONSTRAINT "uid_appointment_user_id_9aa4d2" UNIQUE ("user_id", "source_call_id")
 );
-CREATE INDEX IF NOT EXISTS "idx_appointment_user_id_6586e5" ON "appointments" ("user_id", "start_at");
-CREATE INDEX IF NOT EXISTS "idx_appointment_user_id_439b6d" ON "appointments" ("user_id", "phone");
-COMMENT ON COLUMN "appointments"."status" IS 'SCHEDULED: scheduled\nCANCELLED: cancelled\nCOMPLETED: completed';
+CREATE INDEX IF NOT EXISTS "idx_appointment_source__762418" ON "appointments" ("source_call_id");
+CREATE  INDEX "idx_appointment_user_id_6586e5" ON "appointments" ("user_id", "start_at");
+CREATE  INDEX "idx_appointment_user_id_439b6d" ON "appointments" ("user_id", "phone");
+CREATE  INDEX "idx_appointment_user_id_9aa4d2" ON "appointments" ("user_id", "source_call_id");
+COMMENT ON COLUMN "appointments"."status" IS 'BOOKED: Booked\nFOLLOW_UP_NEEDED: Follow-up Needed';
 CREATE TABLE IF NOT EXISTS "form_submissions" (
     "id" SERIAL NOT NULL PRIMARY KEY,
     "first_name" VARCHAR(100),

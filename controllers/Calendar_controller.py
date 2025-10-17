@@ -15,7 +15,7 @@
 
 # from helpers.token_helper import get_current_user
 # from models.auth import User
-# from models.appointment import Appointment, AppointmentStatus
+# from models.appointment import Appointment, AppointmentOutcome
 
 # # Token/account + link mapping
 # from models.calendar_account import CalendarAccount
@@ -199,11 +199,11 @@
 #         "end": {"dateTime": _iso(end_at), "timeZone": tz},
 #     }
 
-# def _event_status_to_appt_status(ev_status: str, start_at: datetime, end_at: datetime) -> AppointmentStatus:
+# def _event_status_to_appt_status(ev_status: str, start_at: datetime, end_at: datetime) -> AppointmentOutcome:
 #     s = (ev_status or "").lower()
 #     if "cancel" in s or s == "cancelled":
-#         return AppointmentStatus.CANCELLED
-#     return AppointmentStatus.COMPLETED if end_at <= _now_utc() else AppointmentStatus.SCHEDULED
+#         return AppointmentOutcome.CANCELLED
+#     return AppointmentOutcome.COMPLETED if end_at <= _now_utc() else AppointmentOutcome.SCHEDULED
 
 # def _parse_dt_guess(v: Any) -> Optional[datetime]:
 #     # Supports google/caldav-ish 'date' and 'dateTime', and plain ISO strings
@@ -806,7 +806,7 @@
 #         # and webhook will mark it cancelled here.
 #         await link.delete()
 
-#     appt.status = AppointmentStatus.CANCELLED
+#     appt.status = AppointmentOutcome.CANCELLED
 #     await appt.save()
 #     return {"ok": True}
 
@@ -1054,7 +1054,7 @@
 #         mapped = _map_calcom_booking_to_appt(b)
 #         # cancel semantics
 #         if "cancel" in event:
-#             mapped["appt_fields"]["status"] = AppointmentStatus.CANCELLED
+#             mapped["appt_fields"]["status"] = AppointmentOutcome.CANCELLED
 #         # Link to a user (multi-tenant): if you store user_id in webhook secret/id, map here.
 #         # Fallback: use the account's user
 #         user = await User.get(id=acc.user_id)
@@ -1113,7 +1113,7 @@ from tortoise.expressions import Q
 
 from helpers.token_helper import get_current_user
 from models.auth import User
-from models.appointment import Appointment, AppointmentStatus
+from models.appointment import Appointment, AppointmentOutcome
 from models.calendar_account import CalendarAccount
 from models.appointment_link import AppointmentExternalLink
 
@@ -1311,11 +1311,11 @@ def _google_time_block(start_at: datetime, end_at: datetime, tz: str) -> Dict[st
         return {"start": {"date": start_at.date().isoformat()}, "end": {"date": end_at.date().isoformat()}}
     return {"start": {"dateTime": _iso(start_at), "timeZone": tz}, "end": {"dateTime": _iso(end_at), "timeZone": tz}}
 
-def _event_status_to_appt_status(ev_status: str, start_at: datetime, end_at: datetime) -> AppointmentStatus:
+def _event_status_to_appt_status(ev_status: str, start_at: datetime, end_at: datetime) -> AppointmentOutcome:
     s = (ev_status or "").lower()
     if "cancel" in s or s == "cancelled":
-        return AppointmentStatus.CANCELLED
-    return AppointmentStatus.COMPLETED if end_at <= _now_utc() else AppointmentStatus.SCHEDULED
+        return AppointmentOutcome.CANCELLED
+    return AppointmentOutcome.COMPLETED if end_at <= _now_utc() else AppointmentOutcome.SCHEDULED
 
 def _parse_dt_guess(v: Any) -> Optional[datetime]:
     if not v:
@@ -1923,7 +1923,7 @@ async def cancel_event(appointment_id: str, user: Annotated[User, Depends(get_cu
                 _err(400, f"Google cancel failed: {r.text}")
         await link.delete()
 
-    appt.status = AppointmentStatus.CANCELLED
+    appt.status = AppointmentOutcome.CANCELLED
     await appt.save()
     return {"ok": True}
 
@@ -1952,7 +1952,7 @@ async def list_events(
     if status:
         s = status.lower()
         if s in ("scheduled", "completed", "cancelled"):
-            qry = qry.filter(status=getattr(AppointmentStatus, s.upper()))
+            qry = qry.filter(status=getattr(AppointmentOutcome, s.upper()))
     if q:
         qry = qry.filter(Q(title__icontains=q) | Q(notes__icontains=q) | Q(location__icontains=q))
 
@@ -2359,7 +2359,7 @@ async def calcom_webhook(request: Request, x_cal_signature_256: Optional[str] = 
         b = data.get("booking") if isinstance(data, dict) and "booking" in data else data
         mapped = _map_calcom_booking_to_appt(b)
         if "cancel" in event:
-            mapped["appt_fields"]["status"] = AppointmentStatus.CANCELLED
+            mapped["appt_fields"]["status"] = AppointmentOutcome.CANCELLED
         user = await User.get(id=acc.user_id)
         created, updated = 0, 0
         created, updated = await _upsert_from_mapped(user, acc, mapped, created, updated)

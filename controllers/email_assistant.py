@@ -16,7 +16,7 @@
 # from tortoise.expressions import Q
 # from models.auth import User
 # from models.assistant import Assistant
-# from models.appointment import Appointment, AppointmentStatus
+# from models.appointment import Appointment, AppointmentOutcome
 # from models.email import EmailCredential, EmailJob, EmailRecord
 # from helpers.token_helper import get_current_user, decode_user_token, generate_user_token
 # from helpers.vapi_helper import get_headers  
@@ -182,11 +182,11 @@
 #     backoff_hours: int,
 # ) -> List[Appointment]:
 #     if include_unowned:
-#         appts_all = await Appointment.filter(status=AppointmentStatus.SCHEDULED).filter(
+#         appts_all = await Appointment.filter(status=AppointmentOutcome.SCHEDULED).filter(
 #             Q(user=db_user) | Q(user_id=None)
 #         ).all()
 #     else:
-#         appts_all = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED).all()
+#         appts_all = await Appointment.filter(user=db_user, status=AppointmentOutcome.SCHEDULED).all()
 
 #     result: List[Appointment] = []
 #     for a in appts_all:
@@ -616,8 +616,8 @@
 #         appts = appts[: payload.limit]
 
 #     if not appts:
-#         total_all = await Appointment.filter(status=AppointmentStatus.SCHEDULED).count()
-#         total_user = await Appointment.filter(user=db_user, status=AppointmentStatus.SCHEDULED).count()
+#         total_all = await Appointment.filter(status=AppointmentOutcome.SCHEDULED).count()
+#         total_user = await Appointment.filter(user=db_user, status=AppointmentOutcome.SCHEDULED).count()
 #         return {
 #             "success": True,
 #             "sent": 0,
@@ -679,7 +679,7 @@
 #     if not from_email:
 #         raise HTTPException(status_code=400, detail="Missing from_email (set default in EmailCredential or payload)")
 
-#     appts_all = await Appointment.filter(user=db_user).exclude(status=AppointmentStatus.SCHEDULED).all()
+#     appts_all = await Appointment.filter(user=db_user).exclude(status=AppointmentOutcome.SCHEDULED).all()
 #     # effective unscheduled backoff
 #     if payload.unscheduled_backoff_hours is not None:
 #         backoff_h = max(0, payload.unscheduled_backoff_hours)
@@ -771,9 +771,9 @@
 
 # async def _users_with(kind: Kind) -> List[int]:
 #     if kind == "scheduled":
-#         ids = await Appointment.filter(status=AppointmentStatus.SCHEDULED).values_list("user_id", flat=True)
+#         ids = await Appointment.filter(status=AppointmentOutcome.SCHEDULED).values_list("user_id", flat=True)
 #     else:
-#         ids = await Appointment.exclude(status=AppointmentStatus.SCHEDULED).values_list("user_id", flat=True)
+#         ids = await Appointment.exclude(status=AppointmentOutcome.SCHEDULED).values_list("user_id", flat=True)
 #     return [i for i in set(ids) if i]
 
 # async def _tick_user(kind: Kind, uid: int):
@@ -811,7 +811,7 @@
 #                 backoff_hours=max(0, st.repeat_backoff_hours),
 #             )
 #         else:
-#             appts_all = await Appointment.filter(user=db_user).exclude(status=AppointmentStatus.SCHEDULED).all()
+#             appts_all = await Appointment.filter(user=db_user).exclude(status=AppointmentOutcome.SCHEDULED).all()
 #             appts = []
 #             bh = max(0, st.unscheduled_backoff_hours)
 #             for a in appts_all:

@@ -22,7 +22,7 @@ from models.call_log import CallLog
 from models.billing import AccountTransaction
 from models.calendar_account import CalendarAccount
 from models.campaign import Campaign, CampaignLeadProgress
-from models.appointment import Appointment, AppointmentStatus
+from models.appointment import Appointment, AppointmentOutcome
 from models.form_submission import FormSubmission, SubmissionStatus
 from models.call_detail import CallDetail
 from models.message import MessageRecord
@@ -201,7 +201,7 @@ async def get_statistics_advanced(
 
     upcoming = await ap_q.filter(
         start_at__gte=now,
-        status=AppointmentStatus.SCHEDULED.value
+        status=AppointmentOutcome.SCHEDULED.value
     ).order_by("start_at").limit(recent_limit).values(
         "id", "title", "start_at", "end_at", "phone", "location", "status"
     )
@@ -209,7 +209,7 @@ async def get_statistics_advanced(
     recently_completed = await ap_q.filter(
         end_at__lte=now,
         end_at__gte=now - timedelta(days=7),
-        status=AppointmentStatus.COMPLETED.value
+        status=AppointmentOutcome.COMPLETED.value
     ).order_by("-end_at").limit(recent_limit).values(
         "id", "title", "start_at", "end_at", "phone", "location", "status"
     )
