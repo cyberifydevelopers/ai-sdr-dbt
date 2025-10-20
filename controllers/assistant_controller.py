@@ -2585,20 +2585,19 @@ Before calling the tool:
 - Confirm in one short sentence: “Got it — scheduling on {YYYY-MM-DD} at {HH:MM} ({TZ}) for {TITLE or 'Appointment'}.”
 - Then call `book_appointment` with JSON exactly as:
   {
-   
-    "date": "YYYY-MM-DD",
+    "Name": "the good name of the user who is booking the appointment "
+    "date": "2025-MM-DD",
     "time": "HH:MM",
     "timezone": "America/Los_Angeles",
-    "durationMinutes": 30,
     "title": "Appointment",
-    "location": "the location of the user ",
+    "location": "the location like zoom , google meet , outlook or anyother platform  ",
     "phone":"the phone number is number format , maybe with a + sign or something",
-    "notes": ""
+    "notes": "any thing extra if he tells you "
   }
 
-If the user says “tomorrow”, “next Monday”, or vague time like “afternoon”, ask one clarifying question to get an exact date and HH:MM (24h).
+If the user says “tomorrow”, “next Monday”, or vague time like “afternoon”, ask one clarifying question to get an exact date  and also check the user is telling you the correct date or not because he cant tell the date that is a past and HH:MM (24h).
 
-Never call the tool if you don’t have both date and time.
+Never call the tool if you don’t have both date , time , phonenumber , location , and anyother extra thing he will tell you add them to notes 
 Never invent or assume times.
 After the tool responds success, briefly confirm the final local time to the caller.
 """
